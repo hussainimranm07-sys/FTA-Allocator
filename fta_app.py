@@ -120,6 +120,13 @@ if "flash_ids" not in st.session_state:
 if "cascade_summary" not in st.session_state:
     st.session_state["cascade_summary"] = []
 
+# ── Startup cleanup: remove zero or stale alloc_overrides ─────
+_overrides = st.session_state.get("alloc_override", {})
+_nodes     = st.session_state.get("nodes", {})
+_bad_keys  = [k for k, v in _overrides.items() if v == 0 or k not in _nodes]
+for _k in _bad_keys:
+    _overrides.pop(_k, None)
+
 # ═══════════════════════════════════════════════════════════════
 # AUTOSAVE — localStorage bridge
 # Runs a tiny hidden HTML component that:
@@ -338,10 +345,21 @@ def base_allocate(nodes, hz_targets):
 # ═══════════════════════════════════════════════════════════════
 # LIVE ALLOCATION  (base + overrides from rebalancing)
 # ═══════════════════════════════════════════════════════════════
+# LIVE ALLOCATION  (base + overrides from rebalancing)
+# Overrides are ONLY applied if:
+#   - the node still exists in the tree
+#   - the override value is > 0  (zero override = stale, ignore)
+#   - the base allocation is > 0 (node is reachable with a budget)
+# ═══════════════════════════════════════════════════════════════
 def compute_alloc(nodes, hz_targets):
     alloc = base_allocate(nodes, hz_targets)
+    # Prune stale overrides for nodes no longer in tree
+    stale = [nid for nid in st.session_state.get("alloc_override", {}) if nid not in nodes]
+    for nid in stale:
+        del st.session_state["alloc_override"][nid]
+    # Apply remaining overrides only when they are positive and base is positive
     for nid, val in st.session_state.get("alloc_override", {}).items():
-        if nid in nodes:
+        if nid in nodes and val > 0 and alloc.get(nid, 0) > 0:
             alloc[nid] = val
     return alloc, st.session_state.get("rebalanced_nodes", set())
 
@@ -465,11 +483,11 @@ def apply_shared_cascade(nodes, alloc, changed_nid, changed_value):
         alloc = rebalance(nodes, alloc, peer_id, worst, rebal_set, log)
 
     st.session_state["rebalanced_nodes"] = rebal_set
-    # Store overrides
+    # Store overrides — only store positive, non-base values
     base = base_allocate(nodes, st.session_state["hz_targets"])
     for nid, val in alloc.items():
         if nid in nodes:
-            if abs(val - base.get(nid, 0)) > 1e-30:
+            if val > 0 and abs(val - base.get(nid, 0)) > 1e-30:
                 st.session_state["alloc_override"][nid] = val
             else:
                 st.session_state["alloc_override"].pop(nid, None)
