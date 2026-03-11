@@ -1,13 +1,12 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import math, io, json
-from collections import defaultdict
+import math, io, json, datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-st.set_page_config(page_title="FTA Risk Allocator v8", page_icon="🌳", layout="wide")
+st.set_page_config(page_title="FTA Risk Allocator v9", page_icon="🌳", layout="wide")
 
 st.markdown("""
 <style>
@@ -17,21 +16,12 @@ html,body,[class*="css"]{font-family:'IBM Plex Sans',sans-serif}
 section[data-testid="stSidebar"]{background:#161b22!important;border-right:1px solid #30363d}
 section[data-testid="stSidebar"] *{color:#e6edf3!important}
 .fta-header{background:linear-gradient(135deg,#1a2332,#0d1117);border:1px solid #30363d;
-  border-left:4px solid #f97316;border-radius:8px;padding:18px 24px;margin-bottom:16px}
-.fta-header h1{font-family:'IBM Plex Mono',monospace;font-size:1.4rem;color:#f97316;margin:0 0 3px}
-.fta-header p{color:#8b949e;margin:0;font-size:0.8rem}
-.metric-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px}
-.metric-card .ml{font-size:0.65rem;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
-.metric-card .mv{font-family:'IBM Plex Mono',monospace;font-size:1.1rem;font-weight:700}
-.hz-summary{border-radius:10px;padding:16px 20px;margin-bottom:10px;border:1px solid #30363d}
-.hz-summary.pass{border-left:4px solid #3fb950;background:#0a1f0d}
-.hz-summary.fail{border-left:4px solid #f85149;background:#1f0a0a}
-.hz-summary.partial{border-left:4px solid #fbbf24;background:#1a1400}
-.hz-summary h3{font-family:'IBM Plex Mono',monospace;font-size:0.95rem;margin:0 0 8px}
-.hz-summary .srow{display:flex;gap:24px;flex-wrap:wrap;margin-top:6px}
-.hz-summary .stat .lbl{color:#8b949e;font-size:0.62rem;text-transform:uppercase;letter-spacing:1px}
-.hz-summary .stat .val{font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:0.86rem}
-.pass-val{color:#3fb950}.fail-val{color:#f85149}.warn-val{color:#fbbf24}
+  border-left:4px solid #f97316;border-radius:8px;padding:14px 22px;margin-bottom:14px}
+.fta-header h1{font-family:'IBM Plex Mono',monospace;font-size:1.3rem;color:#f97316;margin:0 0 2px}
+.fta-header p{color:#8b949e;margin:0;font-size:0.75rem}
+.metric-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px 14px}
+.metric-card .ml{font-size:0.62rem;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px}
+.metric-card .mv{font-family:'IBM Plex Mono',monospace;font-size:1rem;font-weight:700}
 .tree-table{width:100%;border-collapse:collapse;font-size:0.8rem}
 .tree-table th{background:#1c2128;color:#8b949e;font-size:0.62rem;text-transform:uppercase;
   letter-spacing:1px;padding:8px 10px;text-align:left;border-bottom:1px solid #30363d}
@@ -52,7 +42,6 @@ section[data-testid="stSidebar"] *{color:#e6edf3!important}
 .tag-lock{background:#1c2128;color:#fbbf24;border:1px solid #fbbf24}
 .tag-sync{background:#2d1e00;color:#fbbf24;border:1px solid #fbbf24}
 .tag-rebal{background:#0d2136;color:#58a6ff;border:1px solid #58a6ff}
-.tag-auto{background:#0d2128;color:#3fb950;border:1px solid #3fb950}
 .change-log{background:#161b22;border:1px solid #30363d;border-left:3px solid #fbbf24;
   border-radius:6px;padding:10px 14px;margin:8px 0;font-size:0.78rem}
 .change-log .cl-title{color:#fbbf24;font-weight:700;margin-bottom:6px;font-family:'IBM Plex Mono',monospace}
@@ -75,37 +64,38 @@ VALID_PARENTS = {
     "IF":  ["FF"],
     "AND": ["HZ","SF","FF"],
 }
-TYPE_ORDER = ["HZ","SF","AND","FF","IF"]
 VC = {"HZ":"hz","SF":"sf","FF":"ff","IF":"if","AND":"and"}
 HZ_PALETTE = ["#f97316","#58a6ff","#3fb950","#e040fb","#fbbf24","#06b6d4","#f43f5e","#a3e635"]
 
 GATE_INFO = {
-    "OR":  "OR Gate: Any single child failure causes the parent.\nAllocation: each child = parent ÷ n\nRollup: parent = Σ children",
-    "AND": "AND Gate (Combined Faults): ALL children must fail simultaneously.\nAllocation: each child = parent^(1/n)\nRollup: parent = Π children",
+    "OR":  "OR Gate: Any single child failure causes the parent.\nAlloc (top-down): each child = parent ÷ n\nRollup (bottom-up): parent = Σ children",
+    "AND": "AND Gate: ALL children must fail simultaneously.\nAlloc (top-down): each child = parent^(1/n)\nRollup (bottom-up): parent = Π children",
     "–":   "Top-level Hazard node. Budget = HZ target.",
 }
 TYPE_INFO = {
-    "HZ":  "Hazard (HZ): Top-level undesired event. Target is the maximum tolerable failure rate per year.",
-    "SF":  "System Failure (SF): A high-level system failure mode contributing to the hazard.",
-    "FF":  "Following Failure (FF): A sub-system failure mode. Child of SF or another FF.",
+    "HZ":  "Hazard (HZ): Top-level undesired event. Target = max tolerable failure rate/year.",
+    "SF":  "System Failure (SF): High-level failure mode contributing to the hazard.",
+    "FF":  "Following Failure (FF): Sub-system failure mode. Child of SF or another FF.",
     "IF":  "Initiating Failure (IF): Leaf-level basic event. Enter demonstrated/achieved value here.",
     "AND": "AND Node: Combined Faults gate — all children must fail simultaneously.",
 }
 
 # ═══════════════════════════════════════════════════════════════
-# DEFAULT STATE (empty — user builds from scratch per workflow)
+# SESSION STATE
 # ═══════════════════════════════════════════════════════════════
 def default_state():
     return {
         "nodes": {},
         "hz_targets": {},
         "next_id": 1,
+        # alloc_override: maps nid -> float, ONLY for manually rebalanced nodes
+        # Key rule: these override the pure top-down allocation ONLY when explicitly set
+        # They are NEVER set from achieved values
         "alloc_override": {},
         "rebalanced_nodes": set(),
-        "change_log": [],          # list of dicts describing cascade changes
-        "flash_ids": [],           # node ids to flash yellow in viz
-        "cascade_summary": [],     # summary rows for cascade popup
-        "last_search": "",
+        "change_log": [],
+        "flash_ids": [],
+        "cascade_summary": [],
     }
 
 for k, v in default_state().items():
@@ -113,147 +103,91 @@ for k, v in default_state().items():
         st.session_state[k] = v
 if not isinstance(st.session_state.get("rebalanced_nodes"), set):
     st.session_state["rebalanced_nodes"] = set()
-if "change_log" not in st.session_state:
-    st.session_state["change_log"] = []
-if "flash_ids" not in st.session_state:
-    st.session_state["flash_ids"] = []
-if "cascade_summary" not in st.session_state:
-    st.session_state["cascade_summary"] = []
 
-# ── Startup cleanup: remove zero or stale alloc_overrides ─────
-_overrides = st.session_state.get("alloc_override", {})
-_nodes     = st.session_state.get("nodes", {})
-_bad_keys  = [k for k, v in _overrides.items() if v == 0 or k not in _nodes]
-for _k in _bad_keys:
-    _overrides.pop(_k, None)
+# Startup: clear any zero/invalid overrides that may have been saved
+_ov = st.session_state.get("alloc_override", {})
+_nd = st.session_state.get("nodes", {})
+for _k in [k for k, v in _ov.items() if not (v and v > 0 and k in _nd)]:
+    _ov.pop(_k, None)
 
 # ═══════════════════════════════════════════════════════════════
-# AUTOSAVE — localStorage bridge
-# Runs a tiny hidden HTML component that:
-#   1. On first load: reads localStorage["fta_autosave"] and posts it back
-#   2. On every render: receives current state and writes to localStorage
-# Communication via postMessage to/from the hidden iframe.
+# AUTOSAVE
 # ═══════════════════════════════════════════════════════════════
 def serialize_state():
-    """Serialise session state to a JSON-safe dict for localStorage."""
     return json.dumps({
-        "nodes":           st.session_state.nodes,
-        "hz_targets":      st.session_state.hz_targets,
-        "next_id":         st.session_state.next_id,
-        "alloc_override":  st.session_state.alloc_override,
+        "nodes":            st.session_state.nodes,
+        "hz_targets":       st.session_state.hz_targets,
+        "next_id":          st.session_state.next_id,
+        "alloc_override":   {k:v for k,v in st.session_state.alloc_override.items() if v and v > 0},
         "rebalanced_nodes": list(st.session_state.rebalanced_nodes),
-        "saved_at":        __import__("datetime").datetime.utcnow().isoformat() + "Z",
-        "version": "v8",
+        "saved_at":         datetime.datetime.utcnow().isoformat() + "Z",
+        "version": "v9",
     })
 
-def deserialize_state(raw: str):
-    """Load JSON string back into session state. Returns True on success."""
+def deserialize_state(raw):
     try:
         d = json.loads(raw)
-        if "nodes" not in d or "hz_targets" not in d:
-            return False
-        st.session_state.nodes           = d["nodes"]
-        st.session_state.hz_targets      = d["hz_targets"]
-        st.session_state.next_id         = d.get("next_id", 1)
-        st.session_state.alloc_override  = d.get("alloc_override", {})
+        if "nodes" not in d or "hz_targets" not in d: return False
+        st.session_state.nodes            = d["nodes"]
+        st.session_state.hz_targets       = d["hz_targets"]
+        st.session_state.next_id          = d.get("next_id", 1)
+        st.session_state.alloc_override   = {k:v for k,v in d.get("alloc_override",{}).items() if v and v > 0}
         st.session_state.rebalanced_nodes = set(d.get("rebalanced_nodes", []))
-        st.session_state.change_log      = []
-        st.session_state.flash_ids       = []
-        st.session_state.cascade_summary = []
+        st.session_state.change_log       = []
+        st.session_state.flash_ids        = []
+        st.session_state.cascade_summary  = []
         return True
     except Exception:
         return False
 
-AUTOSAVE_KEY = "fta_autosave_v8"
+AUTOSAVE_KEY = "fta_autosave_v9"
 
-def autosave_bridge(state_json: str, slot_names: list):
-    """
-    Hidden component that:
-    - On mount: reads localStorage and posts back via postMessage
-    - Each render: writes state_json to localStorage autosave slot
-    """
-    slots_js = json.dumps(slot_names)
-    return f"""<!DOCTYPE html><html><head><style>
-body{{margin:0;padding:0;background:transparent;height:0;overflow:hidden}}
-</style></head><body>
-<script>
+def autosave_bridge(state_json, slot_names):
+    sj = json.dumps(state_json)
+    sl = json.dumps(slot_names)
+    return f"""<!DOCTYPE html><html><head><style>body{{margin:0;height:0;overflow:hidden}}</style></head><body><script>
 const KEY='{AUTOSAVE_KEY}';
-const stateJSON={json.dumps(state_json)};
-const slotNames={slots_js};
-
-// Write autosave on every render
-try{{localStorage.setItem(KEY, stateJSON);}}catch(e){{}}
-
-// On first load: post saved data back to Streamlit parent
-// We use a flag in sessionStorage so we only restore once per browser tab session
-if(!sessionStorage.getItem('fta_restored')){{
-  sessionStorage.setItem('fta_restored','1');
-  const saved=localStorage.getItem(KEY);
-  if(saved){{
-    try{{
-      window.parent.postMessage({{type:'fta_restore',data:saved}},'*');
-    }}catch(e){{}}
-  }}
+try{{localStorage.setItem(KEY,{sj});}}catch(e){{}}
+if(!sessionStorage.getItem('fta_restored_v9')){{
+  sessionStorage.setItem('fta_restored_v9','1');
+  const s=localStorage.getItem(KEY);
+  if(s)try{{window.parent.postMessage({{type:'fta_restore',data:s}},'*');}}catch(e){{}}
 }}
-
-// Listen for slot save/load/delete commands from parent
+try{{const sl=JSON.parse(localStorage.getItem('fta_slot_list_v9')||'[]');
+window.parent.postMessage({{type:'fta_slots_list',slots:sl}},'*');}}catch(e){{}}
 window.addEventListener('message',function(ev){{
   if(!ev.data||!ev.data.type)return;
   if(ev.data.type==='fta_slot_save'){{
-    try{{localStorage.setItem('fta_slot_'+ev.data.name, ev.data.data);
-    // Also update slot list
-    let sl=JSON.parse(localStorage.getItem('fta_slot_list')||'[]');
+    try{{localStorage.setItem('fta_slot_v9_'+ev.data.name,ev.data.data);
+    let sl=JSON.parse(localStorage.getItem('fta_slot_list_v9')||'[]');
     if(!sl.includes(ev.data.name))sl.push(ev.data.name);
-    localStorage.setItem('fta_slot_list',JSON.stringify(sl));
-    window.parent.postMessage({{type:'fta_slot_saved',name:ev.data.name}},'*');
-    }}catch(e){{}}
+    localStorage.setItem('fta_slot_list_v9',JSON.stringify(sl));
+    window.parent.postMessage({{type:'fta_slots_list',slots:sl}},'*');}}catch(e){{}}
   }}
   if(ev.data.type==='fta_slot_load'){{
-    try{{const d=localStorage.getItem('fta_slot_'+ev.data.name);
-    if(d)window.parent.postMessage({{type:'fta_restore',data:d,slot:ev.data.name}},'*');
-    }}catch(e){{}}
+    try{{const d=localStorage.getItem('fta_slot_v9_'+ev.data.name);
+    if(d)window.parent.postMessage({{type:'fta_restore',data:d}},'*');}}catch(e){{}}
   }}
   if(ev.data.type==='fta_slot_delete'){{
-    try{{localStorage.removeItem('fta_slot_'+ev.data.name);
-    let sl=JSON.parse(localStorage.getItem('fta_slot_list')||'[]');
+    try{{localStorage.removeItem('fta_slot_v9_'+ev.data.name);
+    let sl=JSON.parse(localStorage.getItem('fta_slot_list_v9')||'[]');
     sl=sl.filter(s=>s!==ev.data.name);
-    localStorage.setItem('fta_slot_list',JSON.stringify(sl));
-    window.parent.postMessage({{type:'fta_slot_deleted',name:ev.data.name}},'*');
-    }}catch(e){{}}
-  }}
-  if(ev.data.type==='fta_get_slots'){{
-    try{{const sl=JSON.parse(localStorage.getItem('fta_slot_list')||'[]');
-    window.parent.postMessage({{type:'fta_slots_list',slots:sl}},'*');
-    }}catch(e){{}}
+    localStorage.setItem('fta_slot_list_v9',JSON.stringify(sl));
+    window.parent.postMessage({{type:'fta_slots_list',slots:sl}},'*');}}catch(e){{}}
   }}
 }});
-// Report current slots list on mount
-try{{const sl=JSON.parse(localStorage.getItem('fta_slot_list')||'[]');
-window.parent.postMessage({{type:'fta_slots_list',slots:sl}},'*');}}catch(e){{}}
 </script></body></html>"""
 
-# ── RESTORE RELAY ─────────────────────────────────────────────
-# A hidden text_input receives the restore payload via postMessage → Streamlit JS trick
-# We also need a hidden component that listens for postMessages from the bridge iframe
-# and relays them into a Streamlit text_input
-RELAY_COMPONENT = """<!DOCTYPE html><html><head><style>body{margin:0;height:0;overflow:hidden}</style></head><body>
-<script>
+RELAY_COMPONENT = """<!DOCTYPE html><html><head><style>body{margin:0;height:0;overflow:hidden}</style></head><body><script>
 window.addEventListener('message',function(ev){
   if(!ev.data)return;
-  // relay fta_restore → hidden input
-  if(ev.data.type==='fta_restore'){
-    const el=window.parent.document.querySelector('input[data-testid="stTextInput"][aria-label="__fta_restore__"]');
-    if(el){const nv=ev.data.data;const setter=Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype,'value').set;setter.call(el,nv);el.dispatchEvent(new Event('input',{bubbles:true}));}
+  function relay(label,val){
+    const el=window.parent.document.querySelector('input[aria-label="'+label+'"]');
+    if(el){const s=Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype,'value').set;
+    s.call(el,val);el.dispatchEvent(new Event('input',{bubbles:true}));}
   }
-  // relay fta_slots_list → slots input
-  if(ev.data.type==='fta_slots_list'){
-    const el=window.parent.document.querySelector('input[data-testid="stTextInput"][aria-label="__fta_slots__"]');
-    if(el){const nv=JSON.stringify(ev.data.slots);const setter=Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype,'value').set;setter.call(el,nv);el.dispatchEvent(new Event('input',{bubbles:true}));}
-  }
-  if(ev.data.type==='fta_slot_saved'||ev.data.type==='fta_slot_deleted'){
-    // trigger slots refresh
-    window.parent.postMessage({type:'fta_get_slots'},'*');
-  }
+  if(ev.data.type==='fta_restore')relay('__fta_restore__',ev.data.data);
+  if(ev.data.type==='fta_slots_list')relay('__fta_slots__',JSON.stringify(ev.data.slots));
 });
 </script></body></html>"""
 
@@ -296,7 +230,6 @@ def get_hz_ancestor(nodes, nid):
     return None
 
 def get_parent_chain(nodes, nid):
-    """Returns list from HZ down to nid."""
     chain, cur, seen = [], nid, set()
     while cur and cur not in seen:
         seen.add(cur); chain.append(cur)
@@ -321,14 +254,25 @@ def fmt(v):
     return f"{v:.3E}"
 
 def nodes_by_label(nodes, label):
-    """Return all node IDs sharing a label."""
     return [nid for nid, n in nodes.items() if n.get("label","") == label]
 
 # ═══════════════════════════════════════════════════════════════
-# TOP-DOWN ALLOCATION  (always recalculated fresh)
+# ALLOCATION ENGINE
 # ═══════════════════════════════════════════════════════════════
+# RULE: Allocation (Target/Budget) is COMPLETELY independent of Achieved values.
+# Achieved values NEVER influence the allocation tree.
+# The only way allocation changes is:
+#   1. Pure top-down from HZ targets (base_allocate)
+#   2. Manual lock + rebalance triggered by user via the rebalance button
+#      (alloc_override stores per-node manual budget splits)
+# ═══════════════════════════════════════════════════════════════
+
 def base_allocate(nodes, hz_targets):
-    """Pure top-down allocation ignoring any achieved/override values."""
+    """
+    Pure top-down allocation. Completely ignores achieved values.
+    OR gate:  each child = parent / n
+    AND gate: each child = parent ^ (1/n)
+    """
     alloc = {}
     def recurse(nid, budget):
         alloc[nid] = budget
@@ -336,274 +280,241 @@ def base_allocate(nodes, hz_targets):
         if not children: return
         n = len(children)
         for child in children:
-            cb = budget**(1.0/n) if child["gate"] == "AND" else budget / n
+            if child["gate"] == "AND":
+                cb = budget ** (1.0 / n) if budget > 0 else 0.0
+            else:  # OR or –
+                cb = budget / n if n > 0 else 0.0
             recurse(child["id"], cb)
     for hz in get_hz_roots(nodes):
         recurse(hz["id"], hz_targets.get(hz["id"], 1e-8))
     return alloc
 
-# ═══════════════════════════════════════════════════════════════
-# LIVE ALLOCATION  (base + overrides from rebalancing)
-# ═══════════════════════════════════════════════════════════════
-# LIVE ALLOCATION  (base + overrides from rebalancing)
-# Overrides are ONLY applied if:
-#   - the node still exists in the tree
-#   - the override value is > 0  (zero override = stale, ignore)
-#   - the base allocation is > 0 (node is reachable with a budget)
-# ═══════════════════════════════════════════════════════════════
 def compute_alloc(nodes, hz_targets):
+    """
+    Final allocation = base_allocate + manual overrides.
+    Overrides are only applied when:
+    - node exists in tree
+    - override value is strictly positive
+    - base allocation for that node is also positive (reachable)
+    Zero overrides are NEVER applied — they are treated as stale/invalid.
+    """
     alloc = base_allocate(nodes, hz_targets)
-    # Prune stale overrides for nodes no longer in tree
-    stale = [nid for nid in st.session_state.get("alloc_override", {}) if nid not in nodes]
-    for nid in stale:
-        del st.session_state["alloc_override"][nid]
-    # Apply remaining overrides only when they are positive and base is positive
+    # Prune stale overrides
+    stale = [k for k, v in st.session_state.get("alloc_override", {}).items()
+             if k not in nodes or not (v and v > 0)]
+    for k in stale:
+        st.session_state["alloc_override"].pop(k, None)
+    # Apply valid overrides
     for nid, val in st.session_state.get("alloc_override", {}).items():
         if nid in nodes and val > 0 and alloc.get(nid, 0) > 0:
             alloc[nid] = val
     return alloc, st.session_state.get("rebalanced_nodes", set())
 
 # ═══════════════════════════════════════════════════════════════
-# REBALANCING ENGINE
+# MANUAL REBALANCE ENGINE
+# Triggered only by explicit user action (lock + rebalance button).
+# Uses ONLY alloc values — never touches achieved.
 # ═══════════════════════════════════════════════════════════════
-def _cascade_down(nodes, alloc, nid, budget, rebal_set, log):
-    """Distribute budget to children of nid using gate logic. Recurse."""
+
+def _split_budget_down(nodes, alloc, nid, budget, rebal_set, log):
+    """
+    Recursively distribute `budget` to children of `nid`.
+    Uses locked children's CURRENT ALLOC (never achieved) to compute remaining.
+    """
     alloc[nid] = budget
     children = get_children(nodes, nid)
     if not children: return
-    locked_ch = [c for c in children if nodes[c["id"]].get("locked", False)]
-    free_ch   = [c for c in children if not nodes[c["id"]].get("locked", False)]
-    gate = children[0].get("gate", "OR")
-    n_free = len(free_ch)
+    locked   = [c for c in children if nodes[c["id"]].get("locked", False)]
+    free     = [c for c in children if not nodes[c["id"]].get("locked", False)]
+    gate     = children[0].get("gate", "OR")
+    n_free   = len(free)
     if n_free == 0: return
-    locked_sum  = sum(nodes[c["id"]].get("achieved") or alloc.get(c["id"], 0) for c in locked_ch)
-    locked_prod = 1.0
-    for c in locked_ch:
-        v = nodes[c["id"]].get("achieved") or alloc.get(c["id"], 1e-8)
-        locked_prod *= max(v, 1e-300)
 
     if gate == "OR":
-        remaining = max(0.0, budget - locked_sum)
-        share = remaining / n_free
-        for c in free_ch:
+        # locked children keep their current alloc; split remainder among free
+        locked_sum = sum(alloc.get(c["id"], 0) for c in locked)
+        remaining  = max(0.0, budget - locked_sum)
+        share      = remaining / n_free
+        for c in free:
             old = alloc.get(c["id"])
             alloc[c["id"]] = share
             rebal_set.add(c["id"])
-            if old is not None and abs(share - old) > 1e-30:
-                log.append({"nid": c["id"], "label": nodes[c["id"]].get("label",""), "old": old, "new": share, "reason": "cascade OR"})
-            _cascade_down(nodes, alloc, c["id"], share, rebal_set, log)
-    elif gate == "AND":
-        n_all = len(children)
-        numerator = budget / locked_prod if locked_prod > 0 and budget > 0 else 0
-        x = numerator**(1.0/n_free) if numerator > 0 else 0.0
-        for c in free_ch:
+            if old is not None and abs(share - (old or 0)) > 1e-30:
+                log.append({"nid": c["id"], "label": nodes[c["id"]].get("label",""),
+                            "old": old, "new": share, "reason": "OR rebalance"})
+            _split_budget_down(nodes, alloc, c["id"], share, rebal_set, log)
+    else:  # AND
+        locked_prod = 1.0
+        for c in locked:
+            v = alloc.get(c["id"], 1e-8) or 1e-8
+            locked_prod *= max(v, 1e-300)
+        denom = locked_prod if locked_prod > 0 else 1e-300
+        numerator = (budget / denom) if budget > 0 else 0
+        x = numerator ** (1.0 / n_free) if numerator > 0 else 0.0
+        for c in free:
             old = alloc.get(c["id"])
             alloc[c["id"]] = x
             rebal_set.add(c["id"])
-            if old is not None and abs(x - old) > 1e-30:
-                log.append({"nid": c["id"], "label": nodes[c["id"]].get("label",""), "old": old, "new": x, "reason": "cascade AND"})
-            _cascade_down(nodes, alloc, c["id"], x, rebal_set, log)
+            if old is not None and abs(x - (old or 0)) > 1e-30:
+                log.append({"nid": c["id"], "label": nodes[c["id"]].get("label",""),
+                            "old": old, "new": x, "reason": "AND rebalance"})
+            _split_budget_down(nodes, alloc, c["id"], x, rebal_set, log)
 
-def rebalance(nodes, alloc, changed_nid, changed_value, rebal_set, log):
-    """Rebalance siblings of changed_nid so parent budget stays intact."""
+def manual_rebalance(nodes, alloc, locked_nid, log):
+    """
+    When user locks a node and triggers rebalance:
+    - parent budget is sacred and unchanged
+    - locked node keeps its current alloc
+    - free siblings split the remainder
+    - cascades down to their children
+    """
     alloc = dict(alloc)
-    node = nodes.get(changed_nid)
+    node = nodes.get(locked_nid)
     if not node: return alloc
     parent_id = node.get("parent")
     if not parent_id or parent_id not in nodes: return alloc
-
-    parent_budget = alloc.get(parent_id)
-    if parent_budget is None: return alloc
-
-    all_siblings = get_children(nodes, parent_id)
-    gate = node.get("gate", "OR")
-    locked_sibs = [s for s in all_siblings if s["id"] != changed_nid and nodes[s["id"]].get("locked", False)]
-    free_sibs   = [s for s in all_siblings if s["id"] != changed_nid and not nodes[s["id"]].get("locked", False)]
-    locked_sum  = sum(nodes[s["id"]].get("achieved") or alloc.get(s["id"], 0) for s in locked_sibs)
-    locked_prod = 1.0
-    for s in locked_sibs:
-        v = nodes[s["id"]].get("achieved") or alloc.get(s["id"], 1e-8)
-        locked_prod *= max(v, 1e-300)
-
-    n_free = len(free_sibs)
-
-    if gate == "OR":
-        remaining = parent_budget - changed_value - locked_sum
-        share = max(0.0, remaining / n_free) if n_free > 0 else 0.0
-        for s in free_sibs:
-            old = alloc.get(s["id"])
-            alloc[s["id"]] = share
-            rebal_set.add(s["id"])
-            log.append({"nid": s["id"], "label": nodes[s["id"]].get("label",""), "old": old, "new": share, "reason": "sibling OR rebalance"})
-            _cascade_down(nodes, alloc, s["id"], share, rebal_set, log)
-    elif gate == "AND":
-        denom = changed_value * locked_prod
-        numerator = parent_budget / denom if denom > 0 and parent_budget > 0 else 0
-        x = numerator**(1.0/n_free) if (numerator > 0 and n_free > 0) else 0.0
-        for s in free_sibs:
-            old = alloc.get(s["id"])
-            alloc[s["id"]] = x
-            rebal_set.add(s["id"])
-            log.append({"nid": s["id"], "label": nodes[s["id"]].get("label",""), "old": old, "new": x, "reason": "sibling AND rebalance"})
-            _cascade_down(nodes, alloc, s["id"], x, rebal_set, log)
-
-    alloc[changed_nid] = changed_value
-    _cascade_down(nodes, alloc, changed_nid, changed_value, rebal_set, log)
+    parent_budget = alloc.get(parent_id, 0)
+    rebal_set = set(st.session_state.get("rebalanced_nodes", set()))
+    _split_budget_down(nodes, alloc, parent_id, parent_budget, rebal_set, log)
+    st.session_state["rebalanced_nodes"] = rebal_set
+    # Persist overrides (only positive, non-base values)
+    base = base_allocate(nodes, st.session_state["hz_targets"])
+    for nid, val in alloc.items():
+        if nid in nodes and val > 0 and abs(val - base.get(nid, 0)) > 1e-30:
+            st.session_state["alloc_override"][nid] = val
+        else:
+            st.session_state["alloc_override"].pop(nid, None)
     return alloc
 
 # ═══════════════════════════════════════════════════════════════
-# SHARED FAILURE CASCADE
-# When a value changes on node N with label L:
-#   1. Find all nodes with same label L (across all hazards)
-#   2. Set worst-case on all of them
-#   3. For each, rebalance its siblings in its own tree
+# ACHIEVED ROLLUP  (completely separate from allocation)
 # ═══════════════════════════════════════════════════════════════
-def apply_shared_cascade(nodes, alloc, changed_nid, changed_value):
+
+def rollup_achieved(nodes):
     """
-    Apply worst-case sync + sibling rebalancing for all nodes sharing the label.
-    Returns updated alloc, rebal_set, log, list of synced node ids.
+    Bottom-up rollup of achieved values.
+    Completely independent of allocation — never modifies alloc.
+    OR gate:  parent = Σ children
+    AND gate: parent = Π children
+    Leaf nodes use their manually entered achieved value.
+    Non-leaf nodes: if manual override exists, use it; else use rollup.
     """
-    rebal_set = set(st.session_state.get("rebalanced_nodes", set()))
+    rolled = {}
+    def compute(nid):
+        if nid in rolled: return rolled[nid]
+        node = nodes.get(nid)
+        if not node: rolled[nid] = None; return None
+        children = get_children(nodes, nid)
+        if not children:
+            rolled[nid] = node.get("achieved")
+            return rolled[nid]
+        child_vals = [compute(c["id"]) for c in children]
+        if any(v is None for v in child_vals):
+            # incomplete subtree — use manual if available
+            rolled[nid] = node.get("achieved")
+            return rolled[nid]
+        gate = node.get("gate", "OR")
+        if gate == "AND":
+            val = 1.0
+            for v in child_vals: val *= v
+        else:
+            val = sum(child_vals)
+        manual = node.get("achieved")
+        rolled[nid] = manual if manual is not None else val
+        return rolled[nid]
+    for hz in get_hz_roots(nodes): compute(hz["id"])
+    for nid in nodes:
+        if nid not in rolled: compute(nid)
+    return rolled
+
+# ═══════════════════════════════════════════════════════════════
+# SHARED FAILURE SYNC
+# When achieved value changes on node N with label L:
+#   1. Find all nodes with same label (across all hazards)
+#   2. Apply worst-case (max) achieved to all of them
+#   3. Log the changes
+# NOTE: This does NOT touch allocation at all.
+# ═══════════════════════════════════════════════════════════════
+
+def apply_shared_sync(nodes, changed_nid, changed_value):
+    """
+    Sync worst-case achieved value across all nodes sharing the same label.
+    Returns: (log entries, list of synced node ids)
+    Does NOT modify allocation.
+    """
     log = []
-    label = nodes[changed_nid].get("label","")
+    label = nodes[changed_nid].get("label", "")
     peers = nodes_by_label(nodes, label)
-
-    # Worst-case: max of changed_value and existing achieved on peers
     peer_vals = [nodes[p].get("achieved") for p in peers if nodes[p].get("achieved") is not None]
-    worst = max([changed_value] + peer_vals)
-
+    worst = max([changed_value] + [v for v in peer_vals if v is not None])
     synced_ids = []
     for peer_id in peers:
         old_ach = nodes[peer_id].get("achieved")
         nodes[peer_id]["achieved"] = worst
         synced_ids.append(peer_id)
         if peer_id != changed_nid:
-            log.append({"nid": peer_id, "label": label, "old": old_ach, "new": worst, "reason": "shared label sync (worst-case)"})
-        # Rebalance this peer's siblings in its own parent context
-        alloc = rebalance(nodes, alloc, peer_id, worst, rebal_set, log)
-
-    st.session_state["rebalanced_nodes"] = rebal_set
-    # Store overrides — only store positive, non-base values
-    base = base_allocate(nodes, st.session_state["hz_targets"])
-    for nid, val in alloc.items():
-        if nid in nodes:
-            if val > 0 and abs(val - base.get(nid, 0)) > 1e-30:
-                st.session_state["alloc_override"][nid] = val
-            else:
-                st.session_state["alloc_override"].pop(nid, None)
-
-    return alloc, rebal_set, log, synced_ids
+            log.append({
+                "nid": peer_id, "label": label,
+                "old": old_ach, "new": worst,
+                "reason": "shared label → worst-case sync"
+            })
+    return log, synced_ids
 
 # ═══════════════════════════════════════════════════════════════
-# BOTTOM-UP ROLLUP
+# NODE STATUS  (compare achieved rollup vs allocated)
 # ═══════════════════════════════════════════════════════════════
-def rollup_achieved(nodes):
-    rolled = {}
-    def compute(nid):
-        if nid in rolled: return rolled[nid]
-        children = get_children(nodes, nid)
-        node = nodes.get(nid)
-        if not node: rolled[nid]=None; return None
-        if not children:
-            rolled[nid]=node.get("achieved"); return rolled[nid]
-        child_vals = [compute(c["id"]) for c in children]
-        if any(v is None for v in child_vals):
-            rolled[nid]=node.get("achieved"); return rolled[nid]
-        gate = node.get("gate","OR")
-        val = 1.0 if gate=="AND" else 0.0
-        for v in child_vals:
-            if gate=="AND": val *= v
-            else: val += v
-        manual = node.get("achieved")
-        rolled[nid] = manual if manual is not None else val
-        return rolled[nid]
-    for hz in get_hz_roots(nodes):
-        compute(hz["id"])
-    for nid in nodes:
-        if nid not in rolled: compute(nid)
-    return rolled
 
-# ═══════════════════════════════════════════════════════════════
-# COMPLIANCE
-# ═══════════════════════════════════════════════════════════════
 def node_status(achieved, allocated):
     if achieved is None or allocated is None: return "na"
     return "pass" if achieved <= allocated else "fail"
 
-def hz_compliance(nodes, hz_targets, rolled, alloc):
-    results = {}
-    for hz in get_hz_roots(nodes):
-        hid = hz["id"]; tgt = hz_targets.get(hid,1e-8); ach = rolled.get(hid)
-        all_ids = descendants(nodes, hid)
-        if_ids  = [i for i in all_ids if nodes.get(i,{}).get("type")=="IF"]
-        if_done = [i for i in if_ids  if nodes.get(i,{}).get("achieved") is not None]
-        results[hid] = {
-            "target": tgt, "achieved": ach,
-            "status": node_status(ach, tgt),
-            "if_total": len(if_ids), "if_entered": len(if_done),
-            "margin": ach/tgt if (ach is not None and tgt) else None,
-        }
-    return results
-
 # ═══════════════════════════════════════════════════════════════
-# VISUALIZATION  (force-OFF, search+path, right-click inline edit,
-#                 flash animation for cascade changes)
+# VISUALIZATION
 # ═══════════════════════════════════════════════════════════════
 def build_viz(nodes, alloc, rolled, hz_targets, rebal_set, flash_ids=None):
+    if flash_ids is None: flash_ids = set()
     order = bfs_order(nodes)
     hz_ids = [n["id"] for n in get_hz_roots(nodes)]
     hz_color_map = {hid: HZ_PALETTE[i%len(HZ_PALETTE)] for i,hid in enumerate(hz_ids)}
-
-    if flash_ids is None:
-        flash_ids = set()
 
     node_data = []
     for nid in order:
         if nid not in nodes: continue
         n = nodes[nid]
-        hz_anc   = get_hz_ancestor(nodes, nid)
-        depth    = get_depth(nodes, nid)
-        ach      = rolled.get(nid); alc = alloc.get(nid)
-        stat     = node_status(ach, alc)
-        chain    = get_parent_chain(nodes, nid)
-        chain_labels = " → ".join(nodes[c].get("label","?") for c in chain if c in nodes)
+        hz_anc = get_hz_ancestor(nodes, nid)
+        depth  = get_depth(nodes, nid)
+        ach    = rolled.get(nid); alc = alloc.get(nid)
+        stat   = node_status(ach, alc)
+        chain  = " → ".join(nodes[c].get("label","?") for c in get_parent_chain(nodes, nid) if c in nodes)
         siblings = get_siblings(nodes, nid)
         sib_info = [{"label": nodes[s].get("label",""), "alloc": fmt(alloc.get(s)), "achieved": fmt(rolled.get(s))} for s in siblings if s in nodes]
-        margin   = ach/alc if (ach is not None and alc and alc > 0) else None
-        # raw numeric achieved for inline edit in right-click
-        ach_raw  = n.get("achieved")
-
+        margin = ach/alc if (ach is not None and alc and alc > 0) else None
         node_data.append({
             "id": nid, "label": n.get("label",nid), "name": n.get("name",""),
             "desc": n.get("desc",""), "type": n["type"], "gate": n["gate"],
-            "alloc": fmt(alc), "achieved": fmt(ach), "ach_raw": ach_raw,
+            "alloc": fmt(alc), "achieved": fmt(ach), "ach_raw": n.get("achieved"),
             "margin": f"{margin:.3f}×" if margin is not None else "–",
             "status": stat, "rebalanced": nid in rebal_set,
             "locked": n.get("locked",False),
             "hz": hz_anc or "", "hz_color": hz_color_map.get(hz_anc,"#58a6ff"),
             "depth": depth, "parent": n.get("parent") or "",
-            "chain": chain_labels, "siblings": sib_info,
+            "chain": chain, "siblings": sib_info,
             "type_info": TYPE_INFO.get(n["type"],""),
             "gate_info": GATE_INFO.get(n["gate"],""),
             "flash": nid in flash_ids,
         })
 
-    edge_data = [
-        {"from": n.get("parent"), "to": nid, "gate": n["gate"]}
-        for nid, n in nodes.items() if n.get("parent") and n["parent"] in nodes
-    ]
-    hz_list    = [{"id":h,"color":hz_color_map[h],"target":fmt(hz_targets.get(h,1e-8))} for h in hz_ids]
-    nodes_json = json.dumps(node_data)
-    edges_json = json.dumps(edge_data)
-    hz_json    = json.dumps(hz_list)
-    flash_json = json.dumps(list(flash_ids))
+    edge_data = [{"from": n.get("parent"), "to": nid, "gate": n["gate"]}
+                 for nid, n in nodes.items() if n.get("parent") and n["parent"] in nodes]
+    hz_list   = [{"id":h,"color":hz_color_map[h],"target":fmt(hz_targets.get(h,1e-8))} for h in hz_ids]
+    nj = json.dumps(node_data); ej = json.dumps(edge_data)
+    hj = json.dumps(hz_list);   fj = json.dumps(list(flash_ids))
 
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{background:#0d1117;font-family:'IBM Plex Sans',sans-serif;overflow:hidden;user-select:none}}
 #wrap{{position:relative;width:100%;height:720px;overflow:hidden}}
-canvas{{position:absolute;top:0;left:0;cursor:grab}}
-canvas.grabbing{{cursor:grabbing}}
+canvas{{position:absolute;top:0;left:0;cursor:grab}}canvas.grabbing{{cursor:grabbing}}
 #ctrl{{position:absolute;top:12px;left:12px;display:flex;flex-direction:column;gap:4px;z-index:20}}
 .btn{{background:#161b22;border:1px solid #30363d;color:#e6edf3;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-family:inherit;transition:all .15s;white-space:nowrap}}
 .btn:hover{{border-color:#58a6ff;color:#58a6ff}}.btn.active{{border-color:#f97316;color:#f97316}}
@@ -615,10 +526,10 @@ canvas.grabbing{{cursor:grabbing}}
 #hzf .title{{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}}
 .hchip{{display:flex;align-items:center;gap:6px;cursor:pointer;padding:3px 0;font-size:11px;color:#e6edf3;transition:opacity .15s}}
 .hchip.off{{opacity:0.3}}.hdot{{width:9px;height:9px;border-radius:50%;flex-shrink:0}}
-#legend{{position:absolute;bottom:46px;left:12px;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:7px 11px;font-size:10px;color:#8b949e;z-index:20;display:flex;gap:10px;flex-wrap:wrap;max-width:400px}}
+#legend{{position:absolute;bottom:46px;left:12px;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:7px 11px;font-size:10px;color:#8b949e;z-index:20;display:flex;gap:10px;flex-wrap:wrap;max-width:420px}}
 .leg{{display:flex;align-items:center;gap:4px}}.leg-dot{{width:8px;height:8px;border-radius:50%}}
 #info{{position:absolute;bottom:10px;left:12px;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:4px 11px;font-size:10px;color:#8b949e;z-index:20}}
-#popup{{position:absolute;background:#1c2128;border:1px solid #30363d;border-radius:10px;padding:12px 16px;min-width:260px;max-width:295px;z-index:30;display:none;box-shadow:0 12px 40px rgba(0,0,0,0.75);pointer-events:none}}
+#popup{{position:absolute;background:#1c2128;border:1px solid #30363d;border-radius:10px;padding:12px 16px;min-width:260px;max-width:295px;z-index:30;display:none;box-shadow:0 12px 40px rgba(0,0,0,.75);pointer-events:none}}
 #popup h3{{font-family:'IBM Plex Mono',monospace;font-size:13px;margin:0 0 2px}}
 #popup .psub{{font-size:9px;color:#8b949e;margin-bottom:8px;word-break:break-all}}
 #popup .prow{{display:flex;justify-content:space-between;gap:10px;padding:3px 0;border-bottom:1px solid #21262d;font-size:10px}}
@@ -626,10 +537,10 @@ canvas.grabbing{{cursor:grabbing}}
 #popup .pk{{color:#8b949e}}#popup .pv{{color:#e6edf3;font-family:'IBM Plex Mono',monospace;text-align:right}}
 #popup .pv.pass{{color:#3fb950}}#popup .pv.fail{{color:#f85149}}
 #popup .phint{{margin-top:7px;font-size:9px;color:#444;text-align:center}}
-#ctx-menu{{position:absolute;background:#1c2128;border:1px solid #30363d;border-radius:10px;padding:0;width:320px;z-index:40;display:none;box-shadow:0 12px 48px rgba(0,0,0,0.85);overflow:hidden;pointer-events:all}}
+#ctx-menu{{position:absolute;background:#1c2128;border:1px solid #30363d;border-radius:10px;padding:0;width:320px;z-index:40;display:none;box-shadow:0 12px 48px rgba(0,0,0,.85);overflow:hidden;pointer-events:all}}
 #ctx-menu .cm-head{{padding:9px 14px 8px;background:#161b22;border-bottom:1px solid #30363d;display:flex;align-items:center;justify-content:space-between}}
 #ctx-menu .cm-head h4{{font-family:'IBM Plex Mono',monospace;font-size:12px;color:#f97316;margin:0}}
-#ctx-menu .cm-head .cm-close{{background:none;border:none;color:#8b949e;cursor:pointer;font-size:16px;line-height:1;padding:0}}
+#ctx-menu .cm-head .cm-close{{background:none;border:none;color:#8b949e;cursor:pointer;font-size:16px;padding:0}}
 #ctx-menu .cm-head .cm-close:hover{{color:#e6edf3}}
 #ctx-menu .cm-body{{padding:10px 14px;max-height:490px;overflow-y:auto}}
 #ctx-menu .cm-sec{{font-size:9px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin:10px 0 4px;border-top:1px solid #21262d;padding-top:7px}}
@@ -653,7 +564,7 @@ canvas.grabbing{{cursor:grabbing}}
 #ctx-menu .cm-btn:hover{{border-color:#58a6ff;color:#58a6ff}}
 #ctx-menu .cm-btn.save{{background:#0a2a1a;border-color:#3fb950;color:#3fb950}}
 #ctx-menu .cm-btn.clr{{background:#2a0a0a;border-color:#f85149;color:#f85149}}
-#cascade-overlay{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1c2128;border:2px solid #fbbf24;border-radius:12px;padding:18px 22px;z-index:50;display:none;box-shadow:0 16px 56px rgba(0,0,0,0.9);min-width:300px;max-width:400px;pointer-events:all}}
+#cascade-overlay{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#1c2128;border:2px solid #fbbf24;border-radius:12px;padding:18px 22px;z-index:50;display:none;box-shadow:0 16px 56px rgba(0,0,0,.9);min-width:300px;max-width:400px;pointer-events:all}}
 #cascade-overlay h4{{font-family:'IBM Plex Mono',monospace;font-size:13px;color:#fbbf24;margin:0 0 10px}}
 .co-row{{font-size:11px;color:#8b949e;padding:3px 0;border-bottom:1px solid #21262d}}
 .co-row span{{color:#e6edf3;font-family:'IBM Plex Mono',monospace}}
@@ -681,38 +592,35 @@ canvas.grabbing{{cursor:grabbing}}
     <div class="leg"><div class="leg-dot" style="background:#3fb950"></div>Pass</div>
     <div class="leg"><div class="leg-dot" style="background:#f85149"></div>Exceeds</div>
     <div class="leg"><div class="leg-dot" style="background:#444"></div>No data</div>
-    <div class="leg"><div class="leg-dot" style="background:#fbbf24"></div>Cascade flash</div>
-    <div class="leg"><div class="leg-dot" style="background:#58a6ff;border-radius:2px"></div>Rebalanced</div>
+    <div class="leg"><div class="leg-dot" style="background:#fbbf24"></div>Flash=shared sync</div>
+    <div class="leg"><div class="leg-dot" style="background:#58a6ff;border-radius:2px"></div>Rebalanced alloc</div>
     <div class="leg">🔒 Locked &nbsp;✏️ Right-click=edit</div>
   </div>
   <div id="popup">
     <h3 id="p-lbl"></h3><div class="psub" id="p-path"></div>
-    <div class="prow"><span class="pk">Allocated</span><span class="pv" id="p-alloc"></span></div>
-    <div class="prow"><span class="pk">Achieved</span><span class="pv" id="p-ach"></span></div>
-    <div class="prow"><span class="pk">Margin</span><span class="pv" id="p-margin"></span></div>
+    <div class="prow"><span class="pk">Allocated (T)</span><span class="pv" id="p-alloc"></span></div>
+    <div class="prow"><span class="pk">Achieved (A)</span><span class="pv" id="p-ach"></span></div>
     <div class="prow"><span class="pk">Status</span><span class="pv" id="p-status"></span></div>
-    <div class="phint">🔗 Path to root highlighted &nbsp;·&nbsp; Right-click = full edit + info</div>
+    <div class="phint">🔗 Path to root highlighted · Right-click = full edit + info</div>
   </div>
   <div id="ctx-menu">
     <div class="cm-head"><h4 id="cm-title">Node</h4><button class="cm-close" onclick="hideCtxMenu()">✕</button></div>
     <div class="cm-body" id="cm-body"></div>
   </div>
   <div id="cascade-overlay">
-    <h4>🔄 Shared Cascade — Updated Nodes</h4>
+    <h4>🔄 Shared Sync — Updated Nodes</h4>
     <div id="co-content"></div>
     <button class="co-close" onclick="document.getElementById('cascade-overlay').style.display='none'">✕ Close</button>
   </div>
-  <div id="info">🖱 Drag · Scroll=zoom · Drag=pan · Left=highlight path · Right-click=edit+info · ▼=collapse</div>
+  <div id="info">🖱 Drag · Scroll=zoom · Pan=drag bg · Left=highlight path · Right-click=edit+info · ▼=collapse</div>
   <div id="mm"><canvas id="mmc" width="165" height="92"></canvas></div>
 </div>
 <script>
-const NODES={nodes_json};
-const EDGES={edges_json};
-const HZ={hz_json};
-const FLASH_IDS=new Set({flash_json});
+const NODES={nj};const EDGES={ej};const HZ={hj};
+const FLASH_IDS=new Set({fj});
 const BOX_W=154,BOX_H=68,GATE_R=12;
-const TYPE_COL={{HZ:{{fill:"#3d1a00",stroke:"#f97316",text:"#f97316"}},SF:{{fill:"#0d2136",stroke:"#58a6ff",text:"#58a6ff"}},FF:{{fill:"#0d2b14",stroke:"#3fb950",text:"#3fb950"}},IF:{{fill:"#1e0d36",stroke:"#d2a8ff",text:"#d2a8ff"}},AND:{{fill:"#2d1a3d",stroke:"#e040fb",text:"#e040fb"}}}};
-const STATUS_COL={{pass:"#3fb950",fail:"#f85149",na:"#2d333b"}};
+const TC={{HZ:{{fill:"#3d1a00",stroke:"#f97316",text:"#f97316"}},SF:{{fill:"#0d2136",stroke:"#58a6ff",text:"#58a6ff"}},FF:{{fill:"#0d2b14",stroke:"#3fb950",text:"#3fb950"}},IF:{{fill:"#1e0d36",stroke:"#d2a8ff",text:"#d2a8ff"}},AND:{{fill:"#2d1a3d",stroke:"#e040fb",text:"#e040fb"}}}};
+const SC={{pass:"#3fb950",fail:"#f85149",na:"#2d333b"}};
 const wrap=document.getElementById('wrap'),c=document.getElementById('c'),ctx=c.getContext('2d');
 const mmc=document.getElementById('mmc'),mmx=mmc.getContext('2d');
 function resize(){{c.width=wrap.clientWidth;c.height=wrap.clientHeight;}}
@@ -738,7 +646,7 @@ function doAutoLayout(){{
   }});
 }}
 doAutoLayout();panX=wrap.clientWidth/2;
-if(FLASH_IDS.size>0){{flashTimer=90;flashAlpha=1;setTimeout(()=>FLASH_IDS.clear(),4000);}}
+if(FLASH_IDS.size>0){{flashTimer=90;flashAlpha=1;}}
 function simulate(){{
   if(!simRunning)return;
   const ids=Object.keys(pos);
@@ -792,27 +700,27 @@ function drawEdge(a,b,gate,faded){{
   ctx.restore();
 }}
 function drawNode(n,p,faded,isHL,isMatch,isFlash){{
-  if(!p)return;const col=TYPE_COL[n.type]||TYPE_COL.SF,scol=STATUS_COL[n.status]||'#2d333b';
+  if(!p)return;const col=TC[n.type]||TC.SF,scol=SC[n.status]||'#2d333b';
   const x=p.x-BOX_W/2,y=p.y-BOX_H/2;const hasKids=EDGES.some(e=>e.from===n.id),isColl=collapsed.has(n.id);
   ctx.save();ctx.globalAlpha=faded?0.07:1;
   if(isFlash){{ctx.save();ctx.strokeStyle=`rgba(251,191,36,${{flashAlpha}})`;ctx.lineWidth=4;ctx.shadowColor='#fbbf24';ctx.shadowBlur=20*flashAlpha;rr(ctx,x-5,y-5,BOX_W+10,BOX_H+10,13);ctx.stroke();ctx.restore();}}
   if(isMatch){{ctx.save();ctx.strokeStyle='#f97316';ctx.lineWidth=3;ctx.shadowColor='#f97316';ctx.shadowBlur=14;rr(ctx,x-4,y-4,BOX_W+8,BOX_H+8,12);ctx.stroke();ctx.restore();}}
   if(n.rebalanced&&!faded){{ctx.save();ctx.strokeStyle='#58a6ff';ctx.lineWidth=1.8;ctx.setLineDash([4,3]);rr(ctx,x-3,y-3,BOX_W+6,BOX_H+6,11);ctx.stroke();ctx.setLineDash([]);ctx.restore();}}
   if(n.status!=='na'&&!faded){{ctx.shadowColor=scol;ctx.shadowBlur=isHL?14:5;}}
-  ctx.fillStyle='rgba(0,0,0,0.42)';rr(ctx,x+3,y+3,BOX_W,BOX_H,9);ctx.fill();
+  ctx.fillStyle='rgba(0,0,0,.42)';rr(ctx,x+3,y+3,BOX_W,BOX_H,9);ctx.fill();
   ctx.fillStyle=col.fill;rr(ctx,x,y,BOX_W,BOX_H,9);ctx.fill();
-  ctx.strokeStyle=isFlash?`rgba(251,191,36,${{Math.min(1,flashAlpha+0.2)}})`:n.status!=='na'?scol:col.stroke;
+  ctx.strokeStyle=isFlash?`rgba(251,191,36,${{Math.min(1,flashAlpha+.2)}})`:n.status!=='na'?scol:col.stroke;
   ctx.lineWidth=isHL?2.6:1.7;ctx.shadowBlur=0;rr(ctx,x,y,BOX_W,BOX_H,9);ctx.stroke();
-  ctx.fillStyle=col.stroke;ctx.globalAlpha=(faded?0.07:1)*0.17;rr(ctx,x,y,BOX_W,18,9);ctx.fill();ctx.fillRect(x,y+9,BOX_W,9);
-  ctx.globalAlpha=faded?0.07:1;
+  ctx.fillStyle=col.stroke;ctx.globalAlpha=(faded?.07:1)*.17;rr(ctx,x,y,BOX_W,18,9);ctx.fill();ctx.fillRect(x,y+9,BOX_W,9);
+  ctx.globalAlpha=faded?.07:1;
   ctx.fillStyle=col.text;ctx.font='bold 7.5px monospace';ctx.textAlign='center';ctx.textBaseline='top';ctx.fillText(n.type,p.x,y+4);
   if(n.locked){{ctx.font='9px sans-serif';ctx.fillStyle='#fbbf24';ctx.textAlign='left';ctx.fillText('🔒',x+4,y+3);}}
   ctx.fillStyle=col.text;ctx.font='bold 12px monospace';ctx.textBaseline='middle';ctx.fillText(n.label.substring(0,16),p.x,p.y-9);
-  ctx.fillStyle=col.text;ctx.font='7.5px sans-serif';ctx.globalAlpha=(faded?0.07:1)*0.65;ctx.fillText(n.name.substring(0,22),p.x,p.y+5);
-  ctx.globalAlpha=faded?0.07:1;ctx.font='6.8px monospace';
+  ctx.fillStyle=col.text;ctx.font='7.5px sans-serif';ctx.globalAlpha=(faded?.07:1)*.65;ctx.fillText(n.name.substring(0,22),p.x,p.y+5);
+  ctx.globalAlpha=faded?.07:1;ctx.font='6.8px monospace';
   ctx.fillStyle=n.status==='pass'?'#3fb950':n.status==='fail'?'#f85149':'#555';
   ctx.textAlign='left';ctx.fillText('A:'+n.achieved,x+5,y+BOX_H-8);
-  ctx.fillStyle=n.rebalanced?'#58a6ff':'#555';ctx.textAlign='right';ctx.fillText('T:'+n.alloc,x+BOX_W-5,y+BOX_H-8);
+  ctx.fillStyle=n.rebalanced?'#58a6ff':'#8b949e';ctx.textAlign='right';ctx.fillText('T:'+n.alloc,x+BOX_W-5,y+BOX_H-8);
   if(hasKids){{const bx=p.x+BOX_W/2-15,by=y+3,br=7;ctx.fillStyle=isColl?col.stroke:'#21262d';ctx.beginPath();ctx.arc(bx,by+br,br,0,Math.PI*2);ctx.fill();ctx.strokeStyle=col.stroke;ctx.lineWidth=1;ctx.stroke();ctx.fillStyle=isColl?'#0d1117':col.text;ctx.font='bold 9px monospace';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(isColl?'▶':'▼',bx,by+br);}}
   ctx.restore();
 }}
@@ -821,8 +729,8 @@ function drawMinimap(){{
   const vis=NODES.filter(n=>isVisible(n.id)&&pos[n.id]);if(!vis.length)return;
   const allX=vis.map(n=>pos[n.id].x),allY=vis.map(n=>pos[n.id].y);
   const minX=Math.min(...allX)-80,maxX=Math.max(...allX)+80,minY=Math.min(...allY)-40,maxY=Math.max(...allY)+40;
-  const s=Math.min(156/Math.max(maxX-minX,1),84/Math.max(maxY-minY,1))*0.85;
-  vis.forEach(n=>{{const p=pos[n.id];mmx.fillStyle=STATUS_COL[n.status]||'#333';mmx.globalAlpha=0.75;mmx.fillRect((p.x-minX)*s+3-4,(p.y-minY)*s+3-2,10,6);}});
+  const s=Math.min(156/Math.max(maxX-minX,1),84/Math.max(maxY-minY,1))*.85;
+  vis.forEach(n=>{{const p=pos[n.id];mmx.fillStyle=SC[n.status]||'#333';mmx.globalAlpha=.75;mmx.fillRect((p.x-minX)*s+3-4,(p.y-minY)*s+3-2,10,6);}});
   mmx.globalAlpha=1;mmx.strokeStyle='#f97316';mmx.lineWidth=1.5;
   mmx.strokeRect((-panX/scale-minX)*s+3,(-panY/scale-minY)*s+3,Math.min((c.width/scale)*s,156),Math.min((c.height/scale)*s,86));
 }}
@@ -859,16 +767,16 @@ window.addEventListener('mouseup',ev=>{{
 }});
 c.addEventListener('contextmenu',ev=>{{ev.preventDefault();const rect=c.getBoundingClientRect();const{{x:wx,y:wy}}=toWorld(ev.clientX-rect.left,ev.clientY-rect.top);const n=nodeAt(wx,wy);if(n)showCtxMenu(n,ev.clientX-rect.left,ev.clientY-rect.top);else hideCtxMenu();}});
 c.addEventListener('wheel',ev=>{{ev.preventDefault();const rect=c.getBoundingClientRect();const cx=ev.clientX-rect.left,cy=ev.clientY-rect.top;const delta=ev.deltaY<0?1.12:.89;const ns=Math.max(.08,Math.min(5,scale*delta));panX=cx-(cx-panX)*(ns/scale);panY=cy-(cy-panY)*(ns/scale);scale=ns;}},{{passive:false}});
+window.addEventListener('click',()=>hideCtxMenu());
 function handleLeftClick(n,sx,sy){{
   hlSet=walkPath(n.id);popup=n.id;
   const pp=document.getElementById('popup');
-  document.getElementById('p-lbl').textContent=n.label;document.getElementById('p-lbl').style.color=TYPE_COL[n.type]?.text||'#e6edf3';
+  document.getElementById('p-lbl').textContent=n.label;document.getElementById('p-lbl').style.color=TC[n.type]?.text||'#e6edf3';
   document.getElementById('p-path').textContent='🔗 '+n.chain;
   document.getElementById('p-alloc').textContent=n.alloc+' /yr';
   const ae=document.getElementById('p-ach');ae.textContent=n.achieved+' /yr';ae.className='pv '+(n.status==='pass'?'pass':n.status==='fail'?'fail':'');
-  const me=document.getElementById('p-margin');me.textContent=n.margin;me.className='pv '+(n.margin!=='–'?(parseFloat(n.margin)<=1?'pass':'fail'):'');
   const se=document.getElementById('p-status');se.textContent=n.status==='pass'?'✅ PASS':n.status==='fail'?'❌ EXCEEDS':'⬜ No data';se.className='pv '+(n.status==='pass'?'pass':n.status==='fail'?'fail':'');
-  pp.style.display='block';let tx=sx+16,ty=sy-10;if(tx+300>c.width-10)tx=sx-305;if(ty+230>c.height-10)ty=sy-235;pp.style.left=tx+'px';pp.style.top=ty+'px';
+  pp.style.display='block';let tx=sx+16,ty=sy-10;if(tx+300>c.width-10)tx=sx-305;if(ty+200>c.height-10)ty=sy-205;pp.style.left=tx+'px';pp.style.top=ty+'px';
 }}
 function showCtxMenu(n,sx,sy){{
   ctxNode=n;document.getElementById('cm-title').textContent='✏️ '+n.label+' — '+n.type;
@@ -884,22 +792,21 @@ function showCtxMenu(n,sx,sy){{
     <div class="cm-sec">Path to Root</div>
     <div class="cm-chain">🔗 ${{n.chain}}</div>
     <div class="cm-sec">Allocation & Status</div>
-    <div class="cm-row"><span class="cm-key">Allocated (live)</span><span class="cm-val ${{n.rebalanced?'rebal':''}}">${{n.alloc}} /yr</span></div>
-    <div class="cm-row"><span class="cm-key">Achieved (rolled)</span><span class="cm-val ${{alcCol}}">${{n.achieved}} /yr</span></div>
-    <div class="cm-row"><span class="cm-key">Margin</span><span class="cm-val ${{alcCol}}">${{n.margin}}</span></div>
+    <div class="cm-row"><span class="cm-key">Allocated (T)</span><span class="cm-val ${{n.rebalanced?'rebal':''}}">${{n.alloc}} /yr</span></div>
+    <div class="cm-row"><span class="cm-key">Achieved (A)</span><span class="cm-val ${{alcCol}}">${{n.achieved}} /yr</span></div>
     <div class="cm-row"><span class="cm-key">Status</span><span class="cm-val ${{alcCol}}">${{n.status==='pass'?'✅ PASS':n.status==='fail'?'❌ EXCEEDS':'⬜ No data'}}</span></div>
-    ${{n.rebalanced?'<div class="cm-row"><span></span><span class="cm-val rebal">🔵 Budget rebalanced</span></div>':''}}
+    ${{n.rebalanced?'<div class="cm-row"><span></span><span class="cm-val rebal">🔵 T was manually rebalanced</span></div>':''}}
     ${{n.locked?'<div class="cm-row"><span></span><span class="cm-val warn">🔒 Locked (excluded from rebalance)</span></div>':''}}
     <div class="cm-sec">Siblings (${{n.siblings.length}})</div>
     ${{sibRows}}
     <div class="cm-sec">✏️ Edit Achieved Value</div>
-    <div class="cm-el">Mantissa × 10^Exponent (e.g. 3.5 × 10⁻⁶)</div>
+    <div class="cm-el">Mantissa × 10^Exponent (e.g. 3.5E-06)</div>
     <div class="cm-er"><label>Mantissa</label><input type="number" id="edit-mant" value="${{defM}}" min="0" max="9.99" step="0.01" oninput="updatePreview()"></div>
     <div class="cm-er"><label>Exponent</label><input type="number" id="edit-exp" value="${{defE}}" min="-20" max="0" step="1" oninput="updatePreview()"></div>
     <div class="cm-preview" id="edit-preview">Preview: —</div>
     <div class="cm-btns">
-      <button class="cm-btn save" onclick="submitEdit()">💾 Apply & Cascade</button>
-      <button class="cm-btn clr" onclick="clearEdit()">✕ Clear Value</button>
+      <button class="cm-btn save" onclick="submitEdit()">💾 Apply</button>
+      <button class="cm-btn clr" onclick="clearEdit()">✕ Clear</button>
     </div>
     <div class="cm-sec">Node Type Info</div>
     <div class="cm-info">${{n.type_info}}</div>
@@ -935,15 +842,11 @@ function toggleCA(){{allCA=!allCA;if(allCA)NODES.forEach(n=>{{if(EDGES.some(e=>e
 HZ.forEach(h=>{{const d=document.createElement('div');d.className='hchip';d.innerHTML=`<div class="hdot" style="background:${{h.color}}"></div>${{h.id}} <span style="color:#8b949e;font-size:10px">${{h.target}}</span>`;let on=true;d.addEventListener('click',()=>{{on=!on;d.classList.toggle('off',!on);on?activeHz.add(h.id):activeHz.delete(h.id);}});document.getElementById('hzchips').appendChild(d);}});
 window.addEventListener('message',ev=>{{
   if(ev.data&&ev.data.type==='fta_edit'){{
-    try{{const el=window.parent.document.getElementById('viz_edit_relay');if(el){{el.value=JSON.stringify(ev.data);el.dispatchEvent(new Event('input',{{bubbles:true}}));}}}}catch(e){{}}
+    try{{const el=window.parent.document.querySelector('input[aria-label="viz_edit_relay"]');if(el){{const s=Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype,'value').set;s.call(el,JSON.stringify(ev.data));el.dispatchEvent(new Event('input',{{bubbles:true}}));}}}}catch(e){{}}
   }}
 }});
 function loop(){{simulate();draw();requestAnimationFrame(loop);}}loop();
 </script></body></html>"""
-
-# ═══════════════════════════════════════════════════════════════
-# SIDEBAR  – workflow-ordered node addition
-# ═══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("### ⚙️ FTA Builder")
 
@@ -1096,9 +999,10 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════
 nodes      = st.session_state.nodes
 hz_targets = st.session_state.hz_targets
+# Pure top-down allocation — never influenced by achieved values
 alloc, rebal_set = compute_alloc(nodes, hz_targets)
+# Pure bottom-up rollup — completely separate from allocation
 rolled     = rollup_achieved(nodes)
-compliance = hz_compliance(nodes, hz_targets, rolled, alloc)
 order      = bfs_order(nodes)
 hz_list    = [n for n in nodes.values() if n["type"]=="HZ"]
 n_sf = sum(1 for v in nodes.values() if v["type"]=="SF")
@@ -1109,41 +1013,13 @@ if_done  = sum(1 for n in all_if if n.get("achieved") is not None)
 
 # ═══════════════════════════════════════════════════════════════
 # HEADER
-# ═══════════════════════════════════════════════════════════════
 st.markdown("""<div class="fta-header">
-  <h1>🌳 FTA Risk Allocator v8</h1>
-  <p>Workflow builder · Auto-calculated budgets · Shared failure cascade · Sibling rebalancing · Lock · Search · Right-click info</p>
-</div>""", unsafe_allow_html=True)
-
-# Compliance summary
-if hz_list:
-    st.markdown("### 📊 Hazard Compliance")
-    hz_cols = st.columns(len(hz_list))
-    for col, hz in zip(hz_cols, hz_list):
-        hid=hz["id"]; comp=compliance.get(hid,{}); tgt=comp.get("target",0); ach=comp.get("achieved")
-        stat=comp.get("status","na"); margin=comp.get("margin"); ift=comp.get("if_total",0); ife=comp.get("if_entered",0)
-        css="pass" if stat=="pass" else ("fail" if stat=="fail" else "partial")
-        icon="✅" if stat=="pass" else ("❌" if stat=="fail" else "⬜")
-        with col:
-            st.markdown(f"""<div class="hz-summary {css}">
-  <h3>{icon} {hz.get('label',hid)} — {hz.get('name','')}</h3>
-  <div class="srow">
-    <div class="stat"><div class="lbl">Target</div><div class="val" style="color:#8b949e">{fmt(tgt)}</div></div>
-    <div class="stat"><div class="lbl">Achieved</div><div class="val {'pass-val' if stat=='pass' else 'fail-val' if stat=='fail' else 'warn-val'}">{fmt(ach) if ach else '–'}</div></div>
-    <div class="stat"><div class="lbl">Margin</div><div class="val {'pass-val' if (margin and margin<=1) else 'fail-val' if (margin and margin>1) else 'warn-val'}">{f"{margin:.3f}×" if margin else "–"}</div></div>
-    <div class="stat"><div class="lbl">IF Progress</div><div class="val" style="color:#8b949e">{ife}/{ift}</div></div>
-  </div>
+  <h1>🌳 FTA Risk Allocator v9</h1>
+  <p>Auto-calculated budgets (OR: T÷n · AND: T^(1/n)) · Shared failure worst-case sync · Lock &amp; manual rebalance · Search · Right-click edit</p>
 </div>""", unsafe_allow_html=True)
 
 # Metric bar
 st.markdown("<br>",unsafe_allow_html=True)
-cm = st.columns(5)
-def mc(l,v,col): return f'<div class="metric-card"><div class="ml">{l}</div><div class="mv" style="color:{col}">{v}</div></div>'
-with cm[0]: st.markdown(mc("Hazards",len(hz_list),"#f97316"),unsafe_allow_html=True)
-with cm[1]: st.markdown(mc("Sys Failures",n_sf,"#58a6ff"),unsafe_allow_html=True)
-with cm[2]: st.markdown(mc("Flw Failures",n_ff,"#3fb950"),unsafe_allow_html=True)
-with cm[3]: st.markdown(mc("Init Failures",n_if,"#d2a8ff"),unsafe_allow_html=True)
-with cm[4]: st.markdown(mc("IF Values",f"{if_done}/{len(all_if)}","#fbbf24"),unsafe_allow_html=True)
 st.markdown("<br>",unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════
@@ -1235,13 +1111,12 @@ with tab_viz:
                             st.session_state["cascade_summary"] = []
                         else:
                             nodes[edit_nid]["achieved"] = edit_val
-                            new_alloc, new_rebal, new_log, synced_ids = apply_shared_cascade(nodes, alloc, edit_nid, edit_val)
+                            new_log, synced_ids = apply_shared_sync(nodes, edit_nid, edit_val)
                             st.session_state["change_log"] = new_log
-                            flash_set = set(synced_ids) | new_rebal
-                            st.session_state["flash_ids"] = list(flash_set)
+                            st.session_state["flash_ids"] = list(set(synced_ids))
                             if len(synced_ids) > 1:
                                 st.session_state["cascade_summary"] = new_log
-                                st.toast(f"🔄 Shared: cascaded to {len(synced_ids)} nodes, rebalanced {len(new_rebal)} siblings", icon="🔄")
+                                st.toast(f"🔄 Shared sync: updated {len(synced_ids)} nodes with worst-case value", icon="🔄")
                             else:
                                 st.session_state["cascade_summary"] = []
                         # Clear relay
@@ -1277,22 +1152,22 @@ with tab_vals:
                 st.session_state["change_log"] = []; st.rerun()
 
     st.markdown("""
-**Workflow:** Enter achieved values at **IF level** → siblings rebalance to keep parent target → cascade up.
-Nodes sharing the same **Label** are treated as duplicates — worst-case auto-propagates and all their siblings rebalance.
+**Workflow:** Enter achieved values at any level.  
+Nodes sharing the same **Label** across hazards are treated as shared failures — worst-case value auto-propagates to all of them.  
+Allocation (T) is always pure top-down from the HZ target — it is **never influenced by achieved values**.
     """)
 
     for hz in hz_list:
-        hid=hz["id"]; comp=compliance.get(hid,{}); stat=comp.get("status","na")
-        icon="✅" if stat=="pass" else ("❌" if stat=="fail" else "⬜")
-        st.markdown(f"#### {icon} {hz.get('label',hid)} — {hz.get('name','')}")
+        hid=hz["id"]
+        st.markdown(f"#### 🔷 {hz.get('label',hid)} — {hz.get('name','')}")
 
         subtree_ids=[i for i in order if i in ([hid]+descendants(nodes,hid)) and i!=hid and i in nodes]
         if search_tab:
             q=search_tab.lower()
             subtree_ids=[i for i in subtree_ids if q in nodes[i].get("label","").lower() or q in nodes[i].get("name","").lower() or q in nodes[i]["type"].lower()]
 
-        hdr=st.columns([0.35,1.1,2.0,0.6,1.5,1.9,1.4,1.2,0.7])
-        for h,t in zip(hdr,["🔒","Label","Name","Type","Allocated","Achieved (edit)","Rolled-up","Margin","Status"]):
+        hdr=st.columns([0.35,1.1,2.0,0.6,1.8,2.0,1.6])
+        for h,t in zip(hdr,["🔒","Label","Name","Type","Allocated (T)","Achieved (edit)","Rolled-up (A)"]):
             h.markdown(f"<span style='font-size:0.62rem;color:#8b949e;text-transform:uppercase'>{t}</span>",unsafe_allow_html=True)
 
         changed_nid=None; changed_val=None
@@ -1300,13 +1175,13 @@ Nodes sharing the same **Label** are treated as duplicates — worst-case auto-p
             if nid not in nodes: continue
             n=nodes[nid]; t=n["type"]
             alc=alloc.get(nid); ach=n.get("achieved"); roll=rolled.get(nid)
-            stat_n=node_status(roll,alc); depth=get_depth(nodes,nid)
+            depth=get_depth(nodes,nid)
             indent="　"*depth
             is_rebal=nid in rebal_set; is_locked=n.get("locked",False)
             same_label_nodes=nodes_by_label(nodes,n.get("label",""))
             is_shared=len(same_label_nodes)>1
 
-            cols=st.columns([0.35,1.1,2.0,0.6,1.5,1.9,1.4,1.2,0.7])
+            cols=st.columns([0.35,1.1,2.0,0.6,1.8,2.0,1.6])
             new_lock=cols[0].checkbox("",value=is_locked,key=f"lk_{nid}",label_visibility="collapsed",help="Lock: exclude from rebalancing")
             if new_lock!=is_locked:
                 nodes[nid]["locked"]=new_lock; st.rerun()
@@ -1342,23 +1217,19 @@ Nodes sharing the same **Label** are treated as duplicates — worst-case auto-p
                     if new_val!=ach:
                         changed_nid=nid; changed_val=new_val
 
-            cols[6].markdown(f"<span style='font-family:monospace;font-size:0.77rem;color:#8b949e'>{fmt(roll)}</span>",unsafe_allow_html=True)
-            margin=roll/alc if (roll is not None and alc and alc>0) else None
-            mc_col="#3fb950" if (margin and margin<=1) else ("#f85149" if margin else "#8b949e")
-            cols[7].markdown(f"<span style='font-family:monospace;font-size:0.77rem;color:{mc_col}'>{f'{margin:.3f}×' if margin else '–'}</span>",unsafe_allow_html=True)
-            s_html=("<span style='color:#3fb950'>✅</span>" if stat_n=="pass" else "<span style='color:#f85149'>❌</span>" if stat_n=="fail" else "<span style='color:#555'>–</span>")
-            cols[8].markdown(s_html,unsafe_allow_html=True)
+            # Rolled-up: colour by comparison with allocated
+            roll_col = "#3fb950" if (roll is not None and alc and roll <= alc) else ("#f85149" if (roll is not None and alc and roll > alc) else "#8b949e")
+            cols[6].markdown(f"<span style='font-family:monospace;font-size:0.77rem;color:{roll_col}'>{fmt(roll)}</span>",unsafe_allow_html=True)
 
         if changed_nid is not None and changed_val is not None:
-            nodes[changed_nid]["achieved"]=changed_val
-            new_alloc, new_rebal, new_log, synced_ids = apply_shared_cascade(nodes, alloc, changed_nid, changed_val)
+            nodes[changed_nid]["achieved"] = changed_val
+            new_log, synced_ids = apply_shared_sync(nodes, changed_nid, changed_val)
             st.session_state["change_log"] = new_log
-            flash_set = set(synced_ids) | new_rebal
-            st.session_state["flash_ids"] = list(flash_set)
+            st.session_state["flash_ids"] = list(set(synced_ids))
             if len(synced_ids) > 1:
                 other_labels = [nodes[s].get("label","") for s in synced_ids if s != changed_nid]
                 st.session_state["cascade_summary"] = new_log
-                st.toast(f"🔄 Shared cascade: propagated to {', '.join(set(other_labels))} and rebalanced {len(new_rebal)} siblings", icon="🔄")
+                st.toast(f"🔄 Shared sync: worst-case propagated to {', '.join(set(other_labels))}", icon="🔄")
             else:
                 st.session_state["cascade_summary"] = []
             st.rerun()
@@ -1373,12 +1244,11 @@ with tab_table:
     for nid in order:
         if nid not in nodes: continue
         n=nodes[nid]; t=n["type"]; vc=VC.get(t,"sf")
-        alc=alloc.get(nid); roll=rolled.get(nid); stat=node_status(roll,alc)
+        alc=alloc.get(nid); roll=rolled.get(nid)
         par=nodes[n["parent"]]["label"] if n.get("parent") and n["parent"] in nodes else "–"
         lvl=get_depth(nodes,nid); indent=lvl*16
         is_rebal=nid in rebal_set; is_locked=n.get("locked",False)
         is_shared=len(nodes_by_label(nodes,n.get("label","")))>1
-        margin=roll/alc if (roll is not None and alc and alc>0) else None
 
         if search_tbl:
             q=search_tbl.lower()
@@ -1388,9 +1258,8 @@ with tab_table:
         if is_shared: tags+='<span class="tag tag-sync">🔄</span>'
         if is_rebal:  tags+='<span class="tag tag-rebal">🔵</span>'
         if is_locked: tags+='<span class="tag tag-lock">🔒</span>'
-        stat_html=("<span style='color:#3fb950'>✅</span>" if stat=="pass" else "<span style='color:#f85149'>❌</span>" if stat=="fail" else "<span style='color:#555'>–</span>")
         alc_col="#58a6ff" if is_rebal else "#8b949e"
-        mc_col="#3fb950" if (margin and margin<=1) else ("#f85149" if (margin and margin>1) else "#555")
+        roll_col="#3fb950" if (roll is not None and alc and roll<=alc) else ("#f85149" if (roll is not None and alc and roll>alc) else "#8b949e")
         rows_html+=f"""<tr>
           <td style="padding-left:{indent+8}px"><span class="badge b-{t}">{t}</span></td>
           <td style="padding-left:{indent+8}px"><span class="vm c-{vc}">{n.get('label',nid)}</span>{tags}</td>
@@ -1398,14 +1267,12 @@ with tab_table:
           <td style="color:#8b949e;font-size:0.73rem;font-family:monospace">{par}</td>
           <td><span class="{'g-and' if n['gate']=='AND' else 'g-or' if n['gate']=='OR' else ''}">{n['gate']}</span></td>
           <td><span style="font-family:monospace;font-size:0.78rem;color:{alc_col}">{fmt(alc)}</span></td>
-          <td style="font-family:monospace;font-size:0.78rem;color:#8b949e">{fmt(roll)}</td>
-          <td style="font-family:monospace;font-size:0.78rem;color:{mc_col}">{f"{margin:.3f}×" if margin else "–"}</td>
-          <td>{stat_html}</td>
+          <td style="font-family:monospace;font-size:0.78rem;color:{roll_col}">{fmt(roll)}</td>
         </tr>"""
     if rows_html:
         st.markdown(f"""<table class="tree-table"><thead><tr>
           <th>Type</th><th>Label</th><th>Name</th><th>Parent</th><th>Gate</th>
-          <th>Allocated</th><th>Achieved (rolled)</th><th>Margin</th><th>Status</th>
+          <th>Allocated (T)</th><th>Achieved/Rolled (A)</th>
         </tr></thead><tbody>{rows_html}</tbody></table>""",unsafe_allow_html=True)
     else:
         st.info("No nodes match the filter." if search_tbl else "No nodes yet. Add nodes in the sidebar.")
@@ -1461,7 +1328,7 @@ with tab_export:
     with cx:
         st.markdown("**Excel (.xlsx)**")
         def build_excel():
-            wb=Workbook(); ws=wb.active; ws.title="FTA_v8"
+            wb=Workbook(); ws=wb.active; ws.title="FTA_v9"
             def fl(h): return PatternFill("solid",start_color=h,fgColor=h)
             def af(bold=False,color="000000",sz=10): return Font(name="Arial",bold=bold,color=color,size=sz)
             def tb(): s=Side(style="thin",color="BFBFBF"); return Border(left=s,right=s,top=s,bottom=s)
