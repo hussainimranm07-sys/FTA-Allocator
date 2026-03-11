@@ -9,7 +9,6 @@ from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="FTA Risk Allocator", page_icon="🌳", layout="wide")
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600;700&display=swap');
@@ -45,46 +44,81 @@ div[data-testid="stExpander"]{background:#161b22;border:1px solid #30363d;border
 .stTabs [aria-selected="true"]{color:#f97316 !important;border-bottom-color:#f97316 !important}
 .edit-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:12px}
 .edit-card h4{color:#f97316;font-family:'IBM Plex Mono',monospace;margin:0 0 12px 0;font-size:0.9rem}
+.rule-box{background:#161b22;border:1px solid #30363d;border-left:3px solid #f97316;border-radius:6px;padding:12px 16px;margin:6px 0;font-size:0.82rem}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Session state ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# VALID PARENT RULES  ← core of the new feature
+# SF  can live under: HZ, SF, AND
+# FF  can live under: SF, FF, AND
+# IF  can live under: FF
+# AND can live under: HZ, SF, FF
+# ═══════════════════════════════════════════════════════════════
+VALID_PARENTS = {
+    "SF":  ["HZ", "SF", "AND"],
+    "FF":  ["SF", "FF", "AND"],
+    "IF":  ["FF"],
+    "AND": ["HZ", "SF", "FF"],
+}
+
+TYPE_COLOR_SVG = {
+    "HZ":  {"box":"#3d1a00","text":"#f97316","border":"#f97316"},
+    "SF":  {"box":"#0d2136","text":"#58a6ff","border":"#58a6ff"},
+    "FF":  {"box":"#0d2b14","text":"#3fb950","border":"#3fb950"},
+    "IF":  {"box":"#1e0d36","text":"#d2a8ff","border":"#d2a8ff"},
+    "AND": {"box":"#2d1a3d","text":"#e040fb","border":"#e040fb"},
+}
+
+VC_MAP = {"HZ":"hz","SF":"sf","FF":"ff","IF":"if","AND":"and"}
+
+# ── Default tree (includes nested SF→SF and FF→FF examples) ───────────────────
 def default_tree():
     return {
-        "HZ01": {"id":"HZ01","label":"HZxx","name":"Pressurized Fluid Hazard","type":"HZ","parent":None,"gate":"–","desc":"Top-level Hazard Event"},
-        "SF01": {"id":"SF01","label":"SF01","name":"System Failure 01","type":"SF","parent":"HZ01","gate":"OR","desc":"System Failure 01"},
-        "SF02": {"id":"SF02","label":"SF02","name":"System Failure 02","type":"SF","parent":"HZ01","gate":"OR","desc":"System Failure 02"},
-        "SF03": {"id":"SF03","label":"SF03","name":"System Failure 03","type":"SF","parent":"HZ01","gate":"OR","desc":"System Failure 03"},
-        "AND01":{"id":"AND01","label":"CombFaults","name":"Combined Faults","type":"AND","parent":"SF03","gate":"AND","desc":"Combined Faults (AND gate)"},
-        "FF01": {"id":"FF01","label":"FF01","name":"Following Failure 01","type":"FF","parent":"SF01","gate":"OR","desc":"Following Failure 01"},
-        "FF02": {"id":"FF02","label":"FF02","name":"Following Failure 02","type":"FF","parent":"SF01","gate":"OR","desc":"Following Failure 02"},
-        "FF03": {"id":"FF03","label":"FF03","name":"Following Failure 03","type":"FF","parent":"SF02","gate":"OR","desc":"Following Failure 03"},
-        "FF04": {"id":"FF04","label":"FF04","name":"Following Failure 04","type":"FF","parent":"SF02","gate":"OR","desc":"Following Failure 04"},
-        "FF05": {"id":"FF05","label":"FF05","name":"Following Failure 05","type":"FF","parent":"AND01","gate":"AND","desc":"Following Failure 05"},
-        "FF06": {"id":"FF06","label":"FF06","name":"Following Failure 06","type":"FF","parent":"AND01","gate":"AND","desc":"Following Failure 06"},
-        "IF01": {"id":"IF01","label":"IF01","name":"Initiating Failure 01","type":"IF","parent":"FF01","gate":"OR","desc":"Initiating Failure 01"},
-        "IF02": {"id":"IF02","label":"IF02","name":"Initiating Failure 02","type":"IF","parent":"FF01","gate":"OR","desc":"Initiating Failure 02"},
-        "IF03": {"id":"IF03","label":"IF03","name":"Initiating Failure 03","type":"IF","parent":"FF02","gate":"OR","desc":"Initiating Failure 03"},
-        "IF04": {"id":"IF04","label":"IF04","name":"Initiating Failure 04","type":"IF","parent":"FF02","gate":"OR","desc":"Initiating Failure 04"},
-        "IF05": {"id":"IF05","label":"IF05","name":"Initiating Failure 05","type":"IF","parent":"FF03","gate":"OR","desc":"Initiating Failure 05"},
-        "IF06": {"id":"IF06","label":"IF06","name":"Initiating Failure 06","type":"IF","parent":"FF03","gate":"OR","desc":"Initiating Failure 06"},
-        "IF07": {"id":"IF07","label":"IF07","name":"Initiating Failure 07","type":"IF","parent":"FF04","gate":"OR","desc":"Initiating Failure 07"},
-        "IF08": {"id":"IF08","label":"IF08","name":"Initiating Failure 08","type":"IF","parent":"FF04","gate":"OR","desc":"Initiating Failure 08"},
-        "IF09": {"id":"IF09","label":"IF09","name":"Initiating Failure 09","type":"IF","parent":"FF05","gate":"OR","desc":"Initiating Failure 09"},
-        "IF10": {"id":"IF10","label":"IF10","name":"Initiating Failure 10","type":"IF","parent":"FF05","gate":"OR","desc":"Initiating Failure 10"},
-        "IF11": {"id":"IF11","label":"IF11","name":"Initiating Failure 11","type":"IF","parent":"FF06","gate":"OR","desc":"Initiating Failure 11"},
-        "IF12": {"id":"IF12","label":"IF12","name":"Initiating Failure 12","type":"IF","parent":"FF06","gate":"OR","desc":"Initiating Failure 12"},
+        "HZ01":  {"id":"HZ01", "label":"HZxx",      "name":"Pressurized Fluid Hazard",  "type":"HZ",  "parent":None,   "gate":"–",   "desc":"Top-level Hazard Event"},
+        # SF level 1
+        "SF01":  {"id":"SF01", "label":"SF01",       "name":"System Failure 01",          "type":"SF",  "parent":"HZ01", "gate":"OR",  "desc":"System Failure – direct child of Hazard"},
+        "SF02":  {"id":"SF02", "label":"SF02",       "name":"System Failure 02",          "type":"SF",  "parent":"HZ01", "gate":"OR",  "desc":"System Failure – direct child of Hazard"},
+        "SF03":  {"id":"SF03", "label":"SF03",       "name":"System Failure 03",          "type":"SF",  "parent":"HZ01", "gate":"OR",  "desc":"System Failure with nested SF children"},
+        # SF nested under SF03  ← NEW
+        "SF03a": {"id":"SF03a","label":"SF03a",      "name":"Sub System Failure 03a",     "type":"SF",  "parent":"SF03", "gate":"OR",  "desc":"Nested SF – child of SF03"},
+        "SF03b": {"id":"SF03b","label":"SF03b",      "name":"Sub System Failure 03b",     "type":"SF",  "parent":"SF03", "gate":"OR",  "desc":"Nested SF – child of SF03"},
+        # AND under SF02
+        "AND01": {"id":"AND01","label":"CombFaults",  "name":"Combined Faults",            "type":"AND", "parent":"SF02", "gate":"AND", "desc":"Combined Faults (AND gate)"},
+        # FF under SF01
+        "FF01":  {"id":"FF01", "label":"FF01",       "name":"Following Failure 01",        "type":"FF",  "parent":"SF01", "gate":"OR",  "desc":"FF child of SF01"},
+        "FF02":  {"id":"FF02", "label":"FF02",       "name":"Following Failure 02",        "type":"FF",  "parent":"SF01", "gate":"OR",  "desc":"FF child of SF01 – has nested FF"},
+        # FF nested under FF02  ← NEW
+        "FF02a": {"id":"FF02a","label":"FF02a",      "name":"Sub Following Failure 02a",   "type":"FF",  "parent":"FF02", "gate":"OR",  "desc":"Nested FF – child of FF02"},
+        "FF02b": {"id":"FF02b","label":"FF02b",      "name":"Sub Following Failure 02b",   "type":"FF",  "parent":"FF02", "gate":"OR",  "desc":"Nested FF – child of FF02"},
+        # FF under SF03a
+        "FF03":  {"id":"FF03", "label":"FF03",       "name":"Following Failure 03",        "type":"FF",  "parent":"SF03a","gate":"OR",  "desc":"FF child of nested SF03a"},
+        # FF under AND01
+        "FF04":  {"id":"FF04", "label":"FF04",       "name":"Following Failure 04",        "type":"FF",  "parent":"AND01","gate":"AND", "desc":"FF child of AND gate"},
+        "FF05":  {"id":"FF05", "label":"FF05",       "name":"Following Failure 05",        "type":"FF",  "parent":"AND01","gate":"AND", "desc":"FF child of AND gate"},
+        # IFs
+        "IF01":  {"id":"IF01", "label":"IF01","name":"Initiating Failure 01","type":"IF","parent":"FF01", "gate":"OR","desc":"IF01"},
+        "IF02":  {"id":"IF02", "label":"IF02","name":"Initiating Failure 02","type":"IF","parent":"FF01", "gate":"OR","desc":"IF02"},
+        "IF03":  {"id":"IF03", "label":"IF03","name":"Initiating Failure 03","type":"IF","parent":"FF02a","gate":"OR","desc":"IF03"},
+        "IF04":  {"id":"IF04", "label":"IF04","name":"Initiating Failure 04","type":"IF","parent":"FF02a","gate":"OR","desc":"IF04"},
+        "IF05":  {"id":"IF05", "label":"IF05","name":"Initiating Failure 05","type":"IF","parent":"FF02b","gate":"OR","desc":"IF05"},
+        "IF06":  {"id":"IF06", "label":"IF06","name":"Initiating Failure 06","type":"IF","parent":"FF03", "gate":"OR","desc":"IF06"},
+        "IF07":  {"id":"IF07", "label":"IF07","name":"Initiating Failure 07","type":"IF","parent":"FF04", "gate":"OR","desc":"IF07"},
+        "IF08":  {"id":"IF08", "label":"IF08","name":"Initiating Failure 08","type":"IF","parent":"FF04", "gate":"OR","desc":"IF08"},
+        "IF09":  {"id":"IF09", "label":"IF09","name":"Initiating Failure 09","type":"IF","parent":"FF05", "gate":"OR","desc":"IF09"},
+        "IF10":  {"id":"IF10", "label":"IF10","name":"Initiating Failure 10","type":"IF","parent":"FF05", "gate":"OR","desc":"IF10"},
     }
 
-if "tree"       not in st.session_state: st.session_state.tree      = default_tree()
-if "hz_target"  not in st.session_state: st.session_state.hz_target = 1e-8
-if "next_id"    not in st.session_state: st.session_state.next_id   = 100
+if "tree"      not in st.session_state: st.session_state.tree      = default_tree()
+if "hz_target" not in st.session_state: st.session_state.hz_target = 1e-8
+if "next_id"   not in st.session_state: st.session_state.next_id   = 100
 
-# ── Engine ────────────────────────────────────────────────────────────────────
+# ── Core engine (unchanged – already fully recursive, works for any depth) ────
 def get_children(tree, pid):
     return [n for n in tree.values() if n["parent"] == pid]
 
 def allocate_tree(tree, hz_target):
+    """Recursive top-down allocation. Works for any nesting depth."""
     alloc = {}
     def recurse(nid, budget):
         alloc[nid] = budget
@@ -114,8 +148,6 @@ def get_level(tree, nid):
         nid = tree[nid]["parent"]; lvl += 1
     return lvl
 
-def fmt(v): return f"{v:.3E}" if v is not None else "–"
-
 def descendants(tree, tid):
     d = []
     for k, n in tree.items():
@@ -123,111 +155,143 @@ def descendants(tree, tid):
             d.append(k); d.extend(descendants(tree, k))
     return d
 
-# ── Tree SVG visualizer ───────────────────────────────────────────────────────
-def build_svg(tree, alloc):
-    """Build a full top-down SVG fault tree."""
-    TYPE_COLOR = {
-        "HZ":  {"box":"#f97316","text":"#ffffff","border":"#f97316"},
-        "SF":  {"box":"#1a3a5c","text":"#58a6ff","border":"#58a6ff"},
-        "FF":  {"box":"#1a3d1a","text":"#3fb950","border":"#3fb950"},
-        "IF":  {"box":"#2a1a3d","text":"#d2a8ff","border":"#d2a8ff"},
-        "AND": {"box":"#2d1a3d","text":"#e040fb","border":"#e040fb"},
-    }
-    GATE_COLOR = {"OR":"#58a6ff","AND":"#e040fb","–":"#8b949e"}
+def fmt(v): return f"{v:.3E}" if v is not None else "–"
 
-    BOX_W, BOX_H = 130, 52
-    H_GAP, V_GAP = 20, 90
+def would_create_cycle(tree, new_node_id, parent_id):
+    """Check if assigning parent_id as parent of new_node_id creates a cycle."""
+    nid = parent_id
+    visited = set()
+    while nid:
+        if nid == new_node_id: return True
+        if nid in visited: break
+        visited.add(nid)
+        nid = tree.get(nid, {}).get("parent")
+    return False
+
+# ── SVG Visualizer ────────────────────────────────────────────────────────────
+def build_svg(tree, alloc):
+    BOX_W, BOX_H = 138, 56
+    H_GAP, V_GAP = 16, 80
     GATE_R = 14
 
-    # BFS to assign positions
     order = get_ordered(tree)
-    hz_id = order[0]
 
-    # Group nodes by level
+    # Group by level for initial x layout
     levels = {}
     for nid in order:
         lvl = get_level(tree, nid)
         levels.setdefault(lvl, []).append(nid)
 
-    max_lvl = max(levels.keys())
-
-    # Assign x positions within each level
+    # Assign positions: spread each level evenly
     pos = {}
+    max_lvl = max(levels.keys()) if levels else 0
     for lvl, nodes in levels.items():
-        total_w = len(nodes) * BOX_W + (len(nodes)-1) * H_GAP
+        total_w = len(nodes) * BOX_W + (len(nodes) - 1) * H_GAP
         start_x = -total_w / 2
         for i, nid in enumerate(nodes):
-            cx = start_x + i * (BOX_W + H_GAP) + BOX_W/2
-            cy = lvl * (BOX_H + V_GAP + GATE_R*2) + BOX_H/2
+            cx = start_x + i * (BOX_W + H_GAP) + BOX_W / 2
+            cy = lvl * (BOX_H + V_GAP + GATE_R * 2) + BOX_H / 2 + 40
             pos[nid] = (cx, cy)
 
-    # Canvas size
     all_x = [p[0] for p in pos.values()]
     all_y = [p[1] for p in pos.values()]
-    min_x, max_x = min(all_x) - BOX_W, max(all_x) + BOX_W
-    min_y, max_y = min(all_y) - BOX_H, max(all_y) + BOX_H + 20
-    W = max_x - min_x + 60
-    H = max_y - min_y + 60
-    ox, oy = -min_x + 30, -min_y + 30  # offset
+    min_x = min(all_x) - BOX_W / 2 - 30
+    max_x = max(all_x) + BOX_W / 2 + 30
+    min_y = min(all_y) - BOX_H / 2 - 30
+    max_y = max(all_y) + BOX_H / 2 + 40
+    W = max_x - min_x
+    H = max_y - min_y
+    ox, oy = -min_x, -min_y
 
-    lines = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{int(W)}" height="{int(H)}" style="background:#0d1117;border-radius:12px">']
-    lines.append('<defs>')
-    lines.append('<marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#30363d"/></marker>')
-    # Gate symbols
-    lines.append('<symbol id="gate-or" viewBox="0 0 28 28"><ellipse cx="14" cy="14" rx="12" ry="12" fill="#0d2136" stroke="#58a6ff" stroke-width="2"/><text x="14" y="19" text-anchor="middle" font-size="9" fill="#58a6ff" font-family="monospace" font-weight="bold">OR</text></symbol>')
-    lines.append('<symbol id="gate-and" viewBox="0 0 28 28"><rect x="2" y="2" width="24" height="24" rx="6" fill="#2d1a3d" stroke="#e040fb" stroke-width="2"/><text x="14" y="18" text-anchor="middle" font-size="8" fill="#e040fb" font-family="monospace" font-weight="bold">AND</text></symbol>')
-    lines.append('</defs>')
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{int(W)}" height="{int(H)}" '
+        f'style="background:#0d1117;border-radius:12px;font-family:\'IBM Plex Sans\',sans-serif">',
+        '<defs>',
+        '<marker id="arr" markerWidth="7" markerHeight="7" refX="5" refY="3" orient="auto">'
+        '<path d="M0,0 L0,6 L7,3 z" fill="#444"/></marker>',
+        # OR gate symbol (oval)
+        '<symbol id="g-or" viewBox="0 0 30 30">'
+        '<ellipse cx="15" cy="15" rx="13" ry="13" fill="#0d2136" stroke="#58a6ff" stroke-width="2"/>'
+        '<text x="15" y="19" text-anchor="middle" font-size="8" fill="#58a6ff" font-weight="bold" font-family="monospace">OR</text>'
+        '</symbol>',
+        # AND gate symbol (rounded rect)
+        '<symbol id="g-and" viewBox="0 0 30 30">'
+        '<rect x="2" y="2" width="26" height="26" rx="7" fill="#2d1a3d" stroke="#e040fb" stroke-width="2"/>'
+        '<text x="15" y="19" text-anchor="middle" font-size="7" fill="#e040fb" font-weight="bold" font-family="monospace">AND</text>'
+        '</symbol>',
+        '</defs>',
+    ]
 
-    # Draw connections + gates
+    # Draw connectors + gate icons
     for nid in order:
         node = tree[nid]
-        if not node["parent"]: continue
+        if not node["parent"] or node["parent"] not in pos: continue
         px, py = pos[node["parent"]]
         cx, cy = pos[nid]
 
-        # Gate position (midpoint between parent bottom and child top)
-        gate_y = py + BOX_H/2 + GATE_R + 4
+        # Gate position – midway vertically between parent bottom and child top
         gate_x = (px + cx) / 2
+        gate_y = (py + BOX_H / 2 + cy - BOX_H / 2) / 2
 
-        # Line: parent bottom → gate
-        lines.append(f'<line x1="{px+ox:.1f}" y1="{py+oy+BOX_H/2:.1f}" x2="{gate_x+ox:.1f}" y2="{gate_y+oy:.1f}" stroke="#30363d" stroke-width="1.5"/>')
-        # Line: gate → child top
-        lines.append(f'<line x1="{gate_x+ox:.1f}" y1="{gate_y+oy+GATE_R:.1f}" x2="{cx+ox:.1f}" y2="{cy+oy-BOX_H/2:.1f}" stroke="#30363d" stroke-width="1.5" marker-end="url(#arr)"/>')
-
+        # Connector: parent bottom → gate top
+        lines.append(
+            f'<line x1="{px+ox:.1f}" y1="{py+oy+BOX_H/2:.1f}" '
+            f'x2="{gate_x+ox:.1f}" y2="{gate_y+oy-GATE_R:.1f}" '
+            f'stroke="#2d333b" stroke-width="1.5"/>'
+        )
+        # Connector: gate bottom → child top (with arrow)
+        lines.append(
+            f'<line x1="{gate_x+ox:.1f}" y1="{gate_y+oy+GATE_R:.1f}" '
+            f'x2="{cx+ox:.1f}" y2="{cy+oy-BOX_H/2:.1f}" '
+            f'stroke="#2d333b" stroke-width="1.5" marker-end="url(#arr)"/>'
+        )
         # Gate symbol
-        g_sym = "gate-and" if node["gate"] == "AND" else "gate-or"
-        lines.append(f'<use href="#{g_sym}" x="{gate_x+ox-GATE_R:.1f}" y="{gate_y+oy-GATE_R:.1f}" width="{GATE_R*2}" height="{GATE_R*2}"/>')
+        g_sym = "g-and" if node["gate"] == "AND" else "g-or"
+        gx = gate_x + ox - GATE_R
+        gy = gate_y + oy - GATE_R
+        lines.append(f'<use href="#{g_sym}" x="{gx:.1f}" y="{gy:.1f}" width="{GATE_R*2}" height="{GATE_R*2}"/>')
 
-    # Draw boxes
+    # Draw node boxes
     for nid in order:
         node = tree[nid]
+        if nid not in pos: continue
         cx, cy = pos[nid]
-        x, y = cx + ox - BOX_W/2, cy + oy - BOX_H/2
+        x = cx + ox - BOX_W / 2
+        y = cy + oy - BOX_H / 2
         t = node["type"]
-        col = TYPE_COLOR.get(t, TYPE_COLOR["SF"])
+        col = TYPE_COLOR_SVG.get(t, TYPE_COLOR_SVG["SF"])
         val = alloc.get(nid, 0)
 
-        # Box shadow
-        lines.append(f'<rect x="{x+2:.1f}" y="{y+2:.1f}" width="{BOX_W}" height="{BOX_H}" rx="7" fill="#000000" opacity="0.4"/>')
-        # Box fill
-        lines.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{BOX_W}" height="{BOX_H}" rx="7" fill="{col["box"]}" stroke="{col["border"]}" stroke-width="1.5"/>')
+        # Shadow
+        lines.append(f'<rect x="{x+3:.1f}" y="{y+3:.1f}" width="{BOX_W}" height="{BOX_H}" rx="8" fill="#000" opacity="0.35"/>')
+        # Box
+        lines.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{BOX_W}" height="{BOX_H}" rx="8" fill="{col["box"]}" stroke="{col["border"]}" stroke-width="1.8"/>')
 
-        # Label (top)
-        lbl = node.get("label", nid)[:14]
-        lines.append(f'<text x="{cx+ox:.1f}" y="{y+16:.1f}" text-anchor="middle" font-size="10" font-weight="bold" fill="{col["text"]}" font-family="IBM Plex Mono,monospace">{lbl}</text>')
+        # Type badge background strip
+        lines.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{BOX_W}" height="14" rx="8" fill="{col["border"]}" opacity="0.25"/>')
+        lines.append(f'<rect x="{x:.1f}" y="{y+6:.1f}" width="{BOX_W}" height="8" fill="{col["border"]}" opacity="0.25"/>')
 
-        # Name (middle, truncated)
-        name = node.get("name", node.get("desc",""))[:18]
-        lines.append(f'<text x="{cx+ox:.1f}" y="{y+28:.1f}" text-anchor="middle" font-size="7.5" fill="{col["text"]}" opacity="0.85" font-family="IBM Plex Sans,sans-serif">{name}</text>')
+        # Type label
+        lines.append(f'<text x="{cx+ox:.1f}" y="{y+11:.1f}" text-anchor="middle" font-size="8" fill="{col["text"]}" font-weight="bold" font-family="monospace" opacity="0.9">{t}</text>')
 
-        # Allocated value (bottom)
+        # Node label (bold)
+        lbl = node.get("label", nid)[:16]
+        lines.append(f'<text x="{cx+ox:.1f}" y="{y+26:.1f}" text-anchor="middle" font-size="11" font-weight="bold" fill="{col["text"]}" font-family="monospace">{lbl}</text>')
+
+        # Node name (truncated)
+        name = node.get("name", "")[:20]
+        lines.append(f'<text x="{cx+ox:.1f}" y="{y+38:.1f}" text-anchor="middle" font-size="7.5" fill="{col["text"]}" opacity="0.75" font-family="sans-serif">{name}</text>')
+
+        # Allocated value
         val_str = f"{val:.2E}"
-        lines.append(f'<text x="{cx+ox:.1f}" y="{y+42:.1f}" text-anchor="middle" font-size="8" fill="{col["text"]}" opacity="0.7" font-family="IBM Plex Mono,monospace">{val_str}</text>')
+        lines.append(f'<text x="{cx+ox:.1f}" y="{y+51:.1f}" text-anchor="middle" font-size="8" fill="{col["text"]}" opacity="0.6" font-family="monospace">{val_str}</text>')
 
     lines.append('</svg>')
     return "\n".join(lines), int(W), int(H)
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# SIDEBAR
+# ═══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("### ⚙️ FTA Controls")
     st.markdown("---")
@@ -244,163 +308,183 @@ with st.sidebar:
     tree = st.session_state.tree
 
     node_type = st.selectbox("Node Type", ["SF","FF","IF","AND"],
-                              help="SF=System Failure, FF=Following Failure, IF=Initiating Failure, AND=Combined Faults gate")
+        help="SF & FF can now be nested under same type. Rules:\n"
+             "• SF → under HZ, SF, or AND\n"
+             "• FF → under SF, FF, or AND\n"
+             "• IF → under FF only\n"
+             "• AND → under HZ, SF, or FF")
 
-    gate_choice = st.selectbox("Gate Type", ["OR","AND"],
-                                help="OR: any child causes parent | AND: all children must fail together")
+    gate_choice = st.selectbox("Gate Type (this node → parent)", ["OR","AND"],
+        help="OR: this node alone can cause the parent\nAND: all siblings must fail together")
 
-    if node_type == "SF":
-        parents = {k: v["label"] for k, v in tree.items() if v["type"]=="HZ"}
-    elif node_type == "AND":
-        parents = {k: v["label"] for k, v in tree.items() if v["type"]=="SF"}
-    elif node_type == "FF":
-        parents = {k: v["label"] for k, v in tree.items() if v["type"] in ("SF","AND")}
-    else:
-        parents = {k: v["label"] for k, v in tree.items() if v["type"]=="FF"}
+    # ── Dynamic parent filter using VALID_PARENTS ──────────────────────────────
+    allowed_parent_types = VALID_PARENTS.get(node_type, [])
+    parents = {
+        k: f"{v.get('label',k)}  [{v['type']}]"
+        for k, v in tree.items()
+        if v["type"] in allowed_parent_types
+    }
 
     if parents:
-        par_key = st.selectbox("Parent", list(parents.keys()),
-                               format_func=lambda k: f"{tree[k]['label']} ({tree[k]['type']})")
+        par_key   = st.selectbox("Parent Node", list(parents.keys()),
+                                 format_func=lambda k: parents[k])
         new_label = st.text_input("Label (short ID)", value=f"{node_type}{st.session_state.next_id:02d}")
-        new_name  = st.text_input("Name (full name)", value=f"New {node_type} name")
+        new_name  = st.text_input("Name", value=f"New {node_type} name")
         new_desc  = st.text_input("Description", value=f"Describe this {node_type}")
         gate_val  = "AND" if node_type == "AND" else gate_choice
 
         if st.button("➕ Add Node", use_container_width=True):
             nid = f"N{st.session_state.next_id}"
-            st.session_state.tree[nid] = {
-                "id": nid, "label": new_label, "name": new_name,
-                "type": node_type, "parent": par_key,
-                "gate": gate_val, "desc": new_desc
-            }
-            st.session_state.next_id += 1
-            st.rerun()
+            # Cycle guard
+            if would_create_cycle(tree, nid, par_key):
+                st.error("⚠️ This would create a cycle in the tree!")
+            else:
+                st.session_state.tree[nid] = {
+                    "id": nid, "label": new_label, "name": new_name,
+                    "type": node_type, "parent": par_key,
+                    "gate": gate_val, "desc": new_desc
+                }
+                st.session_state.next_id += 1
+                st.rerun()
     else:
-        st.info(f"No valid parents for {node_type}. Add a parent first.")
+        st.info(f"No valid parents for {node_type}.\nAllowed parent types: {allowed_parent_types}")
+
+    # ── Allowed parent rules quick reference ──────────────────────────────────
+    with st.expander("📐 Parent rules"):
+        st.markdown("""
+| Node | Can live under |
+|------|---------------|
+| SF | HZ · SF · AND |
+| FF | SF · FF · AND |
+| IF | FF |
+| AND | HZ · SF · FF |
+        """)
 
     st.markdown("---")
     st.markdown("**🗑️ Delete Node**")
-    deletable = {k: f"{v['label']} ({v['type']})" for k, v in tree.items() if v["type"] != "HZ"}
+    deletable = {k: f"{v.get('label',k)} ({v['type']})" for k, v in tree.items() if v["type"] != "HZ"}
     if deletable:
         del_k = st.selectbox("Node to delete", list(deletable.keys()),
                              format_func=lambda k: deletable[k])
-        if st.button("🗑️ Delete (+ children)", use_container_width=True):
+        n_desc = len(descendants(tree, del_k))
+        if n_desc:
+            st.warning(f"⚠️ Also deletes {n_desc} child node(s).")
+        if st.button("🗑️ Delete", use_container_width=True):
             for d in [del_k] + descendants(tree, del_k):
                 st.session_state.tree.pop(d, None)
             st.rerun()
 
     st.markdown("---")
     if st.button("🔄 Reset to Default", use_container_width=True):
-        for k in ["tree","hz_target","next_id"]: st.session_state.pop(k, None)
+        for k in ["tree","hz_target","next_id"]:
+            st.session_state.pop(k, None)
         st.rerun()
 
-# ── Compute ───────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════
 tree  = st.session_state.tree
 alloc = allocate_tree(tree, st.session_state.hz_target)
 order = get_ordered(tree)
-hz_id = next(k for k, v in tree.items() if v["type"]=="HZ")
+hz_id = next(k for k, v in tree.items() if v["type"] == "HZ")
 
-n_sf = sum(1 for v in tree.values() if v["type"]=="SF")
-n_ff = sum(1 for v in tree.values() if v["type"] in ("FF","AND"))
-n_if = sum(1 for v in tree.values() if v["type"]=="IF")
+n_sf  = sum(1 for v in tree.values() if v["type"] == "SF")
+n_ff  = sum(1 for v in tree.values() if v["type"] in ("FF","AND"))
+n_if  = sum(1 for v in tree.values() if v["type"] == "IF")
+depth = max((get_level(tree, k) for k in tree), default=0)
 
-# ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="fta-header">
-  <h1>🌳 FTA Risk Allocator v2</h1>
-  <p>Dynamic fault tree · Visualize · Edit nodes · Change gates · Auto-reallocate on any change</p>
+  <h1>🌳 FTA Risk Allocator v3</h1>
+  <p>Nested SF→SF · Nested FF→FF · Dynamic gates · Live reallocation · Visualize · Export</p>
 </div>""", unsafe_allow_html=True)
 
-# Metrics
-c1,c2,c3,c4 = st.columns(4)
+c1,c2,c3,c4,c5 = st.columns(5)
 with c1: st.markdown(f'<div class="metric-card"><div class="mlabel">Hazard Target</div><div class="mvalue c-hz">{st.session_state.hz_target:.2E}</div></div>', unsafe_allow_html=True)
 with c2: st.markdown(f'<div class="metric-card"><div class="mlabel">System Failures</div><div class="mvalue c-sf">{n_sf}</div></div>', unsafe_allow_html=True)
 with c3: st.markdown(f'<div class="metric-card"><div class="mlabel">Following Failures</div><div class="mvalue c-ff">{n_ff}</div></div>', unsafe_allow_html=True)
 with c4: st.markdown(f'<div class="metric-card"><div class="mlabel">Initiating Failures</div><div class="mvalue c-if">{n_if}</div></div>', unsafe_allow_html=True)
+with c5: st.markdown(f'<div class="metric-card"><div class="mlabel">Tree Depth</div><div class="mvalue" style="color:#8b949e">{depth}</div></div>', unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# ── Main tabs ─────────────────────────────────────────────────────────────────
 tab_viz, tab_table, tab_edit, tab_export = st.tabs([
-    "🌳 Tree Visualization",
-    "📋 Allocation Table",
-    "✏️ Edit Nodes",
-    "📥 Export"
+    "🌳 Tree Visualization", "📋 Allocation Table", "✏️ Edit Nodes", "📥 Export"
 ])
 
-# ═════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # TAB 1 – VISUALIZATION
-# ═════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 with tab_viz:
     st.markdown("#### Fault Tree Diagram")
-    st.caption("Boxes show: Label · Name · Allocated Target. Gate symbols shown on connections.")
+    st.caption("Shows full tree at any nesting depth. Each box: Label · Name · Allocated Target.")
 
-    col_viz, col_legend = st.columns([4,1])
+    col_viz, col_leg = st.columns([5, 1])
 
-    with col_legend:
+    with col_leg:
         st.markdown("""
-**Legend**
+**Node Types**
 
-🟠 **Hazard**
-Top-level event
-
-🔵 **SF**
-System Failure
-
-🟢 **FF**
-Following Failure
-
-🟣 **IF**
-Initiating Failure
-
-🟤 **AND**
-Combined Faults
+🟠 `HZ` Hazard
+🔵 `SF` System Failure
+🟢 `FF` Following Failure
+🟣 `IF` Initiating Failure
+🟤 `AND` Combined Faults
 
 ---
 **Gates**
 
-🔵 `OR` oval
-Any child → parent
+🔵 Oval = OR
+🟣 Rect = AND
 
-🟣 `AND` rect
-All children → parent
+---
+**Nesting**
+
+SF can be child of SF
+FF can be child of FF
         """)
 
     with col_viz:
         try:
             svg_str, svg_w, svg_h = build_svg(tree, alloc)
-            # Wrap in scrollable div
             st.markdown(
-                f'<div style="overflow:auto;border:1px solid #30363d;border-radius:12px;padding:8px">'
+                f'<div style="overflow:auto;border:1px solid #30363d;border-radius:12px;padding:8px;max-height:680px">'
                 f'{svg_str}</div>',
                 unsafe_allow_html=True
             )
         except Exception as e:
             st.error(f"Visualization error: {e}")
+            import traceback; st.code(traceback.format_exc())
 
-# ═════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # TAB 2 – ALLOCATION TABLE
-# ═════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 with tab_table:
     st.markdown("#### Full Allocation Table")
-    VC = {"HZ":"hz","SF":"sf","FF":"ff","IF":"if","AND":"and"}
-    rows = ""
+    st.caption("Indented to show nesting depth. SF→SF and FF→FF nesting visible here.")
+
+    rows_html = ""
     for nid in order:
         node  = tree[nid]
         lvl   = get_level(tree, nid)
-        val   = alloc.get(nid,0)
+        val   = alloc.get(nid, 0)
         t     = node["type"]
-        vc    = VC.get(t,"sf")
+        vc    = VC_MAP.get(t, "sf")
         par   = tree[node["parent"]]["label"] if node["parent"] else "–"
         gc    = "g-and" if node["gate"]=="AND" else ("g-or" if node["gate"]=="OR" else "g-top")
-        indent= lvl * 22
+        indent = lvl * 22
+        par_type = tree[node["parent"]]["type"] if node["parent"] else "–"
+        # Flag nested same-type
+        nested_flag = ""
+        if node["parent"] and par_type == t:
+            nested_flag = f' <span style="font-size:0.65rem;color:#f97316;border:1px solid #f97316;border-radius:4px;padding:1px 5px">nested</span>'
 
-        rows += f"""<tr>
-          <td style="padding-left:{indent+10}px"><span class="badge b-{t}">{t}</span></td>
+        rows_html += f"""<tr>
+          <td style="padding-left:{indent+10}px"><span class="badge b-{t}">{t}</span>{nested_flag}</td>
           <td style="padding-left:{indent+10}px"><span class="vm c-{vc}">{node.get('label',nid)}</span></td>
           <td style="color:#c9d1d9;font-size:0.82rem">{node.get('name','')}</td>
-          <td style="color:#8b949e;font-size:0.8rem;max-width:220px">{node.get('desc','')}</td>
-          <td style="color:#8b949e;font-size:0.78rem;font-family:'IBM Plex Mono',monospace">{par}</td>
+          <td style="color:#8b949e;font-size:0.78rem;max-width:200px">{node.get('desc','')}</td>
+          <td style="color:#8b949e;font-size:0.78rem;font-family:monospace">{par}</td>
           <td><span class="{gc}">{node['gate']}</span></td>
           <td><span class="vm c-{vc}">{fmt(val)}</span></td>
         </tr>"""
@@ -411,126 +495,127 @@ with tab_table:
       <th>Type</th><th>Label</th><th>Name</th><th>Description</th>
       <th>Parent</th><th>Gate</th><th>Allocated (/yr)</th>
     </tr></thead>
-    <tbody>{rows}</tbody>
+    <tbody>{rows_html}</tbody>
     </table>""", unsafe_allow_html=True)
 
+    # Summary by type
     st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("📊 Summary by Type", expanded=False):
+        rows_sum = []
+        for nid in order:
+            n = tree[nid]
+            par = tree[n["parent"]] if n["parent"] else None
+            rows_sum.append({
+                "Label": n.get("label",""),
+                "Type": n["type"],
+                "Parent Label": par["label"] if par else "–",
+                "Parent Type": par["type"] if par else "–",
+                "Gate": n["gate"],
+                "Depth": get_level(tree, nid),
+                "Allocated (/yr)": fmt(alloc.get(nid,0)),
+                "# Children": len(get_children(tree, nid)),
+            })
+        df = pd.DataFrame(rows_sum)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # Breakdown expanders
-    with st.expander("📊 Level Summaries", expanded=False):
-        t1, t2, t3 = st.tabs(["🔵 System Failures","🟢 Following Failures","🟣 Initiating Failures"])
-        with t1:
-            rows_sf = []
-            for nid in order:
-                n = tree[nid]
-                if n["type"] != "SF": continue
-                ch = get_children(tree, nid)
-                rows_sf.append({"Label":n.get("label",""),"Name":n.get("name",""),"Description":n.get("desc",""),
-                    "# Children":len(ch),"Gate→Children":ch[0]["gate"] if ch else "–",
-                    "Allocated (/yr)":fmt(alloc.get(nid,0)),"Per Child (/yr)":fmt(alloc.get(ch[0]["id"],0)) if ch else "–"})
-            st.dataframe(pd.DataFrame(rows_sf), use_container_width=True, hide_index=True)
-        with t2:
-            rows_ff = []
-            for nid in order:
-                n = tree[nid]
-                if n["type"] not in ("FF","AND"): continue
-                ch = get_children(tree, nid); par = tree[n["parent"]]["label"] if n["parent"] else "–"
-                rows_ff.append({"Label":n.get("label",""),"Name":n.get("name",""),"Type":n["type"],"Parent":par,
-                    "Gate":n["gate"],"# IFs":len(ch),
-                    "Allocated (/yr)":fmt(alloc.get(nid,0)),"Per IF (/yr)":fmt(alloc.get(ch[0]["id"],0)) if ch else "–"})
-            st.dataframe(pd.DataFrame(rows_ff), use_container_width=True, hide_index=True)
-        with t3:
-            rows_if = []
-            for nid in order:
-                n = tree[nid]
-                if n["type"] != "IF": continue
-                par = tree[n["parent"]]["label"] if n["parent"] else "–"
-                sibs = len(get_children(tree, n["parent"])) if n["parent"] else 1
-                rows_if.append({"Label":n.get("label",""),"Name":n.get("name",""),"Description":n.get("desc",""),
-                    "Parent FF":par,"# Siblings":sibs,"Allocated (/yr)":fmt(alloc.get(nid,0))})
-            st.dataframe(pd.DataFrame(rows_if), use_container_width=True, hide_index=True)
-
-# ═════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # TAB 3 – EDIT NODES
-# ═════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 with tab_edit:
     st.markdown("#### ✏️ Edit Node Properties")
-    st.caption("Select any node to edit its label, name, description and gate type. Changes reflect instantly in the tree.")
+    st.caption("Edit label, name, description, gate and — for non-root nodes — reparent to any valid parent.")
 
     col_sel, col_form = st.columns([1, 2])
 
     with col_sel:
         st.markdown("**Select Node**")
-        edit_options = {k: f"{v.get('label',k)} ({v['type']})" for k, v in tree.items()}
+        edit_options = {k: f"{v.get('label',k)}  ({v['type']})" for k, v in tree.items()}
         edit_key = st.selectbox("Node", list(edit_options.keys()),
-                                format_func=lambda k: edit_options[k],
-                                key="edit_select")
+                                format_func=lambda k: edit_options[k], key="edit_sel")
 
     with col_form:
         if edit_key:
             node = tree[edit_key]
-            st.markdown(f'<div class="edit-card"><h4>Editing: {node.get("label", edit_key)} ({node["type"]})</h4>', unsafe_allow_html=True)
+            t    = node["type"]
+            st.markdown(f'<div class="edit-card"><h4>Editing: {node.get("label",edit_key)} ({t})</h4>', unsafe_allow_html=True)
 
-            e_label = st.text_input("Label (short ID)", value=node.get("label",""), key="e_label")
-            e_name  = st.text_input("Name (full name)", value=node.get("name",""),  key="e_name")
-            e_desc  = st.text_area("Description",       value=node.get("desc",""),  key="e_desc", height=80)
+            e_label = st.text_input("Label",       value=node.get("label",""), key="el")
+            e_name  = st.text_input("Name",         value=node.get("name",""),  key="en")
+            e_desc  = st.text_area("Description",   value=node.get("desc",""),  key="ed", height=70)
 
-            # Gate selector (not for HZ or IF)
-            if node["type"] not in ("HZ","IF"):
-                current_gate = node.get("gate","OR")
-                gate_opts = ["OR","AND"]
-                e_gate = st.selectbox("Gate Type",
-                                      gate_opts,
-                                      index=gate_opts.index(current_gate) if current_gate in gate_opts else 0,
-                                      key="e_gate",
-                                      help="OR: any child causes this node | AND: all children must fail")
+            # Gate editor
+            if t not in ("HZ", "IF"):
+                gate_opts   = ["OR","AND"]
+                current_g   = node.get("gate","OR")
+                e_gate = st.selectbox("Gate Type", gate_opts,
+                                      index=gate_opts.index(current_g) if current_g in gate_opts else 0,
+                                      key="eg",
+                                      help="Changing the gate updates how this node's budget is allocated to its children.")
             else:
                 e_gate = node.get("gate","–")
-                st.info(f"Gate: `{e_gate}` (fixed for {node['type']} nodes)")
+                st.info(f"Gate `{e_gate}` is fixed for {t} nodes.")
+
+            # Re-parent editor (not for HZ)
+            if t != "HZ":
+                allowed = VALID_PARENTS.get(t, [])
+                valid_parents = {
+                    k: f"{v.get('label',k)}  [{v['type']}]"
+                    for k, v in tree.items()
+                    if v["type"] in allowed and k != edit_key and k not in descendants(tree, edit_key)
+                }
+                cur_par = node.get("parent","")
+                par_keys = list(valid_parents.keys())
+                cur_idx  = par_keys.index(cur_par) if cur_par in par_keys else 0
+                e_parent = st.selectbox("Parent Node", par_keys,
+                                        index=cur_idx,
+                                        format_func=lambda k: valid_parents[k],
+                                        key="ep",
+                                        help=f"Valid parent types for {t}: {allowed}")
+            else:
+                e_parent = None
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-            if st.button("💾 Save Changes", use_container_width=True, key="save_edit"):
+            if st.button("💾 Save Changes", use_container_width=True, key="save_btn"):
                 st.session_state.tree[edit_key]["label"] = e_label
                 st.session_state.tree[edit_key]["name"]  = e_name
                 st.session_state.tree[edit_key]["desc"]  = e_desc
                 st.session_state.tree[edit_key]["gate"]  = e_gate
-                # If gate changed on a parent, update children's gate reference
-                for k, n in st.session_state.tree.items():
-                    if n["parent"] == edit_key and node["type"] not in ("HZ","IF"):
-                        st.session_state.tree[k]["gate"] = e_gate
-                st.success(f"✅ '{e_label}' updated!")
+                if e_parent and not would_create_cycle(tree, edit_key, e_parent):
+                    st.session_state.tree[edit_key]["parent"] = e_parent
+                elif e_parent:
+                    st.error("⚠️ Cannot reparent — would create a cycle.")
+                st.success(f"✅ '{e_label}' saved!")
                 st.rerun()
 
     st.markdown("---")
-    st.markdown("#### 📋 All Nodes Overview")
+    st.markdown("#### 📋 Full Node List")
     all_rows = []
     for nid in order:
-        n = tree[nid]
+        n   = tree[nid]
+        par = tree[n["parent"]] if n["parent"] else None
         all_rows.append({
-            "ID": nid,
-            "Label": n.get("label",""),
-            "Name": n.get("name",""),
-            "Type": n["type"],
-            "Gate": n["gate"],
-            "Parent": tree[n["parent"]]["label"] if n["parent"] else "–",
-            "Description": n.get("desc",""),
-            "Allocated (/yr)": fmt(alloc.get(nid,0))
+            "Label": n.get("label",""), "Name": n.get("name",""),
+            "Type": n["type"], "Gate": n["gate"],
+            "Parent": par["label"] if par else "–",
+            "Parent Type": par["type"] if par else "–",
+            "Depth": get_level(tree, nid),
+            "Allocated (/yr)": fmt(alloc.get(nid,0)),
+            "Description": n.get("desc","")
         })
     st.dataframe(pd.DataFrame(all_rows), use_container_width=True, hide_index=True)
 
-# ═════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # TAB 4 – EXPORT
-# ═════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 with tab_export:
     st.markdown("#### 📥 Export Options")
 
     col_xl, col_json = st.columns(2)
 
-    # Excel export
     with col_xl:
         st.markdown("**Excel (.xlsx)**")
-        st.caption("Full tree with allocated values, names, descriptions and gate types.")
+        st.caption("Full tree with all levels, names, gates, nesting depth and allocated targets.")
 
         def build_excel(tree, alloc, order):
             wb = Workbook(); ws = wb.active; ws.title = "FTA_Allocation"
@@ -539,19 +624,19 @@ with tab_export:
             def tb():
                 s=Side(style="thin",color="BFBFBF"); return Border(left=s,right=s,top=s,bottom=s)
 
-            for i,w in enumerate([6,12,18,28,36,14,10,18,18],1):
+            for i,w in enumerate([6,10,12,22,32,14,14,10,18,18],1):
                 ws.column_dimensions[get_column_letter(i)].width = w
 
-            ws.merge_cells("A1:I1")
-            ws["A1"]="FAULT TREE ANALYSIS – RISK ALLOCATION"
+            ws.merge_cells("A1:J1")
+            ws["A1"]="FAULT TREE ANALYSIS – RISK ALLOCATION (v3 – Nested SF/FF supported)"
             ws["A1"].font=af(bold=True,sz=13,color="FFFFFF"); ws["A1"].fill=fl("1F3864")
             ws["A1"].alignment=Alignment(horizontal="center",vertical="center"); ws.row_dimensions[1].height=26
 
-            ws.merge_cells("A2:I2")
-            ws["A2"]=f"Hazard Target: {st.session_state.hz_target:.2E} /yr  |  OR=÷n  |  AND=^(1/n)"
+            ws.merge_cells("A2:J2")
+            ws["A2"]=f"Hazard Target: {st.session_state.hz_target:.2E} /yr  |  OR=÷n  |  AND=^(1/n)  |  SF→SF and FF→FF nesting supported"
             ws["A2"].font=af(sz=9,color="595959"); ws["A2"].fill=fl("F2F2F2"); ws.row_dimensions[2].height=14
 
-            hdrs=["Lvl","Type","Label","Name","Description","Parent","Gate","Allocated (/yr)","Calc Method"]
+            hdrs=["Depth","Type","Label","Name","Description","Parent Label","Parent Type","Gate","Allocated (/yr)","Calc Method"]
             for c,h in enumerate(hdrs,1):
                 cell=ws.cell(row=3,column=c,value=h)
                 cell.font=af(bold=True,sz=10,color="FFFFFF"); cell.fill=fl("2E75B6")
@@ -562,69 +647,73 @@ with tab_export:
             LT={"HZ":"FFE7E7","SF":"DEEAF1","FF":"E2EFDA","IF":"FCE4D6","AND":"EAD1DC"}
 
             for i,nid in enumerate(order):
-                n=tree[nid]; lvl=get_level(tree,nid); val=alloc.get(nid,0); t=n["type"]
-                par=tree[n["parent"]]["label"] if n["parent"] else "–"
-                method="AND:^(1/n)" if n["gate"]=="AND" else ("OR:÷n" if n["gate"]=="OR" else "Given")
-                r=i+4
-                vals=[lvl,t,"  "*lvl+n.get("label",nid),n.get("name",""),n.get("desc",""),par,n["gate"],val,method]
+                n   = tree[nid]; lvl=get_level(tree,nid); val=alloc.get(nid,0); t=n["type"]
+                par = tree[n["parent"]] if n["parent"] else None
+                par_lbl  = par["label"] if par else "–"
+                par_type = par["type"]  if par else "–"
+                method   = "AND:^(1/n)" if n["gate"]=="AND" else ("OR:÷n" if n["gate"]=="OR" else "Given")
+                r = i + 4
+                vals = [lvl, t, "  "*lvl+n.get("label",nid), n.get("name",""), n.get("desc",""),
+                        par_lbl, par_type, n["gate"], val, method]
                 for c,v in enumerate(vals,1):
                     cell=ws.cell(row=r,column=c,value=v); cell.border=tb()
-                    cell.alignment=Alignment(horizontal="left" if c in(3,4,5,9) else "center",vertical="center",wrap_text=(c in(4,5)))
+                    cell.alignment=Alignment(horizontal="left" if c in(3,4,5,10) else "center",
+                                            vertical="center",wrap_text=(c in(4,5)))
                     if c==2:
                         cell.fill=fl(BG.get(t,"1F3864")); cell.font=af(bold=True,sz=9,color="FFFFFF")
                         cell.alignment=Alignment(horizontal="center",vertical="center")
-                    elif c==8:
+                    elif c==9:
                         cell.number_format="0.00E+00"; cell.font=af(bold=True,sz=10,color=BG.get(t,"000000"))
                     else:
-                        cell.fill=fl(LT.get(t,"F2F2F2") if c in(3,7) else "FFFFFF"); cell.font=af(sz=9)
+                        cell.fill=fl(LT.get(t,"F2F2F2") if c in(3,8) else "FFFFFF"); cell.font=af(sz=9)
                 ws.row_dimensions[r].height=18
 
             out=io.BytesIO(); wb.save(out); out.seek(0)
             return out.getvalue()
 
         xl = build_excel(tree, alloc, order)
-        st.download_button("⬇️ Download Excel", data=xl,
-                           file_name="FTA_Allocation.xlsx",
+        st.download_button("⬇️ Download Excel", data=xl, file_name="FTA_Allocation_v3.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True)
 
-    # JSON export/import
     with col_json:
-        st.markdown("**JSON (Save/Load tree)**")
-        st.caption("Export your full tree to JSON so you can reload it later.")
+        st.markdown("**JSON – Save & Reload Tree**")
+        st.caption("Save your full tree to reload it later or share with colleagues.")
 
-        tree_json = json.dumps({
-            "hz_target": st.session_state.hz_target,
-            "tree": st.session_state.tree
-        }, indent=2)
+        tree_json = json.dumps({"hz_target": st.session_state.hz_target, "tree": st.session_state.tree}, indent=2)
+        st.download_button("⬇️ Download JSON", data=tree_json, file_name="fta_tree_v3.json",
+                           mime="application/json", use_container_width=True)
 
-        st.download_button("⬇️ Download JSON", data=tree_json,
-                           file_name="fta_tree.json",
-                           mime="application/json",
-                           use_container_width=True)
-
-        st.markdown("**Load saved JSON**")
-        uploaded = st.file_uploader("Upload fta_tree.json", type="json", key="json_upload")
+        st.markdown("**Load saved tree**")
+        uploaded = st.file_uploader("Upload JSON", type="json", key="json_up")
         if uploaded:
             try:
                 loaded = json.load(uploaded)
                 if "tree" in loaded and "hz_target" in loaded:
                     st.session_state.tree      = loaded["tree"]
                     st.session_state.hz_target = loaded["hz_target"]
-                    st.success("✅ Tree loaded successfully!")
-                    st.rerun()
+                    st.success("✅ Tree loaded!"); st.rerun()
                 else:
-                    st.error("Invalid JSON format.")
+                    st.error("Invalid format.")
             except Exception as e:
-                st.error(f"Error loading: {e}")
+                st.error(f"Error: {e}")
 
     st.markdown("---")
-    st.markdown("#### 📐 Allocation Logic Reference")
+    st.markdown("#### 📐 Allocation & Nesting Rules")
     st.markdown("""
-| Gate | Formula | When to use |
-|------|---------|-------------|
-| **OR** | `Child = Parent ÷ n` | Any single child failure causes the parent |
-| **AND** | `Child = Parent^(1/n)` | All children must fail simultaneously (Combined Faults) |
+| Gate | Formula | Use when |
+|------|---------|----------|
+| **OR** | `Child = Parent ÷ n` | Any single child causes the parent |
+| **AND** | `Child = Parent ^ (1/n)` | All children must fail simultaneously |
 
-**Auto-reallocation rule:** Adding or removing any node instantly re-divides the parent budget equally across all current siblings at that level.
+**Supported nesting:**
+
+| Node | Valid parent types |
+|------|-------------------|
+| SF | HZ · **SF** · AND |
+| FF | SF · **FF** · AND |
+| IF | FF |
+| AND | HZ · SF · FF |
+
+When an SF is nested under another SF, it receives its allocated target from the parent SF — the full cascade works recursively at any depth.
     """)
