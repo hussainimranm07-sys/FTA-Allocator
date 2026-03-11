@@ -52,6 +52,12 @@ div[data-testid="stExpander"]{background:#161b22;border:1px solid #30363d;border
 .stButton button:hover{border-color:#58a6ff!important;color:#58a6ff!important}
 .stTabs [data-baseweb="tab"]{color:#8b949e}
 .stTabs [aria-selected="true"]{color:#f97316!important;border-bottom-color:#f97316!important}
+.tip{display:inline-block;position:relative;cursor:help;color:#58a6ff;font-size:0.75rem;margin-left:4px;vertical-align:middle}
+.tip:hover .tipbox{display:block}
+.tipbox{display:none;position:absolute;left:50%;transform:translateX(-50%);bottom:130%;background:#1c2128;border:1px solid #30363d;border-radius:7px;padding:9px 13px;min-width:260px;max-width:320px;font-size:0.72rem;color:#c9d1d9;z-index:999;box-shadow:0 8px 32px rgba(0,0,0,.8);line-height:1.55;pointer-events:none;white-space:normal;text-align:left}
+.tipbox strong{color:#f97316}.tipbox code{color:#3fb950;font-family:monospace}
+.col-alloc{display:inline-block;background:#0d2136;border:1px solid #1e3a5f;border-radius:6px;padding:2px 8px;font-family:monospace;font-size:0.78rem;color:#58a6ff;font-weight:700}
+.col-alloc.rebal{color:#fbbf24;background:#1a1400;border-color:#4a3500}
 </style>
 """, unsafe_allow_html=True)
 
@@ -255,6 +261,37 @@ def fmt(v):
 
 def nodes_by_label(nodes, label):
     return [nid for nid, n in nodes.items() if n.get("label","") == label]
+
+def _tip(label, body):
+    body_esc = body.replace('"', "&quot;")
+    return (f'<span class="tip">{label}'
+            f'<span class="tipbox">{body_esc}</span></span>')
+
+TIP_ALLOC = _tip(
+    "ⓘ",
+    "<strong>Allocated (T)</strong> — Target failure rate budget, calculated pure top-down from the Hazard target.<br>"
+    "OR gate: <code>T = Parent &divide; n</code><br>"
+    "AND gate: <code>T = Parent<sup>1/n</sup></code><br>"
+    "This value is <em>pure maths</em> — it <strong>never changes</strong> because of achieved values. "
+    "It only changes when the tree structure changes or you lock a node and manually rebalance."
+)
+TIP_ACHIEVED = _tip(
+    "ⓘ",
+    "<strong>Achieved (A)</strong> — The demonstrated or estimated failure rate you enter.<br>"
+    "Enter at <strong>IF (Initiating Failure)</strong> leaf nodes for the most accurate rollup.<br>"
+    "You can also override at SF or FF level.<br>"
+    "Nodes sharing the same <strong>Label</strong> across hazards are synced: "
+    "the highest (worst-case) value propagates automatically to all of them."
+)
+TIP_ROLLED = _tip(
+    "ⓘ",
+    "<strong>Rolled-up (A)</strong> — Bottom-up calculated result.<br>"
+    "OR gate: <code>A = &sum; children</code><br>"
+    "AND gate: <code>A = &prod; children</code><br>"
+    "<strong style='color:#3fb950'>Green</strong> = A &le; T (within budget)<br>"
+    "<strong style='color:#f85149'>Red</strong> = A &gt; T (exceeds budget)<br>"
+    "For non-leaf nodes: if you entered a manual value, that overrides the rollup."
+)
 
 # ═══════════════════════════════════════════════════════════════
 # ALLOCATION ENGINE
@@ -1151,11 +1188,7 @@ with tab_vals:
             if st.button("🗑 Clear log"):
                 st.session_state["change_log"] = []; st.rerun()
 
-    st.markdown("""
-**Workflow:** Enter achieved values at any level.  
-Nodes sharing the same **Label** across hazards are treated as shared failures — worst-case value auto-propagates to all of them.  
-Allocation (T) is always pure top-down from the HZ target — it is **never influenced by achieved values**.
-    """)
+    st.markdown("""<div style="background:#161b22;border:1px solid #30363d;border-left:3px solid #58a6ff;border-radius:6px;padding:10px 16px;margin-bottom:10px;font-size:0.82rem;line-height:1.7"><b style="color:#58a6ff">How these columns work:</b><br>▶ <b>Allocated (T)</b> = auto top-down from HZ target (OR: T÷n · AND: T<sup>1/n</sup>) — <em>never</em> affected by achieved values.<br>▶ <b>Achieved (edit)</b> = failure rate you enter manually. Shared-label nodes auto-sync to worst-case (max).<br>▶ <b>Rolled-up (A)</b> = bottom-up result (OR: Σ · AND: Π). <span style="color:#3fb950">●</span> green = within budget · <span style="color:#f85149">●</span> red = exceeds.<br><span style="color:#8b949e;font-size:0.72rem">⚠ Shared failures: each instance keeps its <em>own</em> allocated budget — budgets may differ because each node’s parent has a different number of siblings.</span></div>""", unsafe_allow_html=True)
 
     for hz in hz_list:
         hid=hz["id"]
@@ -1187,15 +1220,28 @@ Allocation (T) is always pure top-down from the HZ target — it is **never infl
                 nodes[nid]["locked"]=new_lock; st.rerun()
 
             tags=""
-            if is_shared: tags+='<span class="tag tag-sync">🔄shared</span>'
+            if is_shared:
+                # Build tooltip showing all peer allocations for this shared label
+                peer_allocs = [(p, fmt(alloc.get(p))) for p in same_label_nodes if p != nid]
+                peer_info = " | ".join(f"{nodes[p].get('label','?')} T={a}" for p,a in peer_allocs) if peer_allocs else ""
+                allocs_differ = len(set(fmt(alloc.get(p)) for p in same_label_nodes)) > 1
+                warn_icon = " ⚠" if allocs_differ else ""
+                tip_shared = _tip("🔄shared" + warn_icon,
+                    f"<strong>Shared failure</strong> \u2014 all nodes with label <code>{n.get('label','')}</code> "
+                    f"share the worst-case achieved value.<br>"
+                    + (f"<strong style='color:#fbbf24'>Note: budgets differ across instances</strong> \u2014 "
+                       f"each instance has its own parent with a different number of siblings.<br>" if allocs_differ else "")
+                    + (f"Other instances: {peer_info}" if peer_info else "")
+                )
+                tags += tip_shared
             if is_rebal:  tags+='<span class="tag tag-rebal">🔵rebal</span>'
             if is_locked: tags+='<span class="tag tag-lock">🔒</span>'
             cols[1].markdown(f"`{indent}{n.get('label',nid)}`{tags}",unsafe_allow_html=True)
             cols[2].markdown(f"<span style='font-size:0.77rem;color:#c9d1d9'>{n.get('name','')}</span>",unsafe_allow_html=True)
             cols[3].markdown(f"<span class='badge b-{t}'>{t}</span>",unsafe_allow_html=True)
 
-            alc_col="#58a6ff" if is_rebal else "#8b949e"
-            cols[4].markdown(f"<span style='font-family:monospace;font-size:0.77rem;color:{alc_col}'>{fmt(alc)}</span>",unsafe_allow_html=True)
+            _alc_cls = "col-alloc rebal" if is_rebal else "col-alloc"
+            cols[4].markdown(f"<span class='{_alc_cls}'>{fmt(alc)}</span>", unsafe_allow_html=True)
 
             with cols[5]:
                 s1,s2,s3=st.columns([1.8,1.2,0.8])
@@ -1258,7 +1304,6 @@ with tab_table:
         if is_shared: tags+='<span class="tag tag-sync">🔄</span>'
         if is_rebal:  tags+='<span class="tag tag-rebal">🔵</span>'
         if is_locked: tags+='<span class="tag tag-lock">🔒</span>'
-        alc_col="#58a6ff" if is_rebal else "#8b949e"
         roll_col="#3fb950" if (roll is not None and alc and roll<=alc) else ("#f85149" if (roll is not None and alc and roll>alc) else "#8b949e")
         rows_html+=f"""<tr>
           <td style="padding-left:{indent+8}px"><span class="badge b-{t}">{t}</span></td>
@@ -1266,13 +1311,13 @@ with tab_table:
           <td style="color:#c9d1d9;font-size:0.78rem">{n.get('name','')}</td>
           <td style="color:#8b949e;font-size:0.73rem;font-family:monospace">{par}</td>
           <td><span class="{'g-and' if n['gate']=='AND' else 'g-or' if n['gate']=='OR' else ''}">{n['gate']}</span></td>
-          <td><span style="font-family:monospace;font-size:0.78rem;color:{alc_col}">{fmt(alc)}</span></td>
+          <td><span class="{'col-alloc rebal' if is_rebal else 'col-alloc'}">{fmt(alc)}</span></td>
           <td style="font-family:monospace;font-size:0.78rem;color:{roll_col}">{fmt(roll)}</td>
         </tr>"""
     if rows_html:
         st.markdown(f"""<table class="tree-table"><thead><tr>
           <th>Type</th><th>Label</th><th>Name</th><th>Parent</th><th>Gate</th>
-          <th>Allocated (T)</th><th>Achieved/Rolled (A)</th>
+          <th style='color:#58a6ff'>Allocated (T)</th><th>Achieved / Rolled-up (A)</th>
         </tr></thead><tbody>{rows_html}</tbody></table>""",unsafe_allow_html=True)
     else:
         st.info("No nodes match the filter." if search_tbl else "No nodes yet. Add nodes in the sidebar.")
