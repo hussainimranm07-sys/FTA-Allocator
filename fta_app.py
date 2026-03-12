@@ -101,11 +101,11 @@ hr{border-color:#1e2d45!important}
 VALID_PARENTS = {
     "SF":  ["HZ", "SF", "AND"],
     "FF":  ["SF", "FF", "AND"],
-    "IF":  ["FF", "SF"],          # IF can hang directly from SF too
+    "IF":  ["FF", "SF"],
     "AND": ["HZ", "SF", "FF"],
 }
-TYPE_COLOR = {"HZ":"hz","SF":"sf","FF":"ff","IF":"if","AND":"and"}
-SAVE_FILE  = "fta_save.json"      # local filesystem save
+TYPE_STR   = {"HZ":"#fb923c","SF":"#60a5fa","FF":"#34d399","IF":"#c084fc","AND":"#e879f9"}
+SAVE_FILE  = "fta_save.json"
 
 # ══════════════════════════════════════════════════════════════════════
 # SESSION STATE INIT
@@ -1121,5 +1121,4 @@ else:
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                use_container_width=True)
 
-# ── TYPE_STR constant for vals tab (needs to be after CSS) ────
-TYPE_STR = {"HZ":"#fb923c","SF":"#60a5fa","FF":"#34d399","IF":"#c084fc","AND":"#e879f9"}
+
