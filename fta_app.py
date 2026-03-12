@@ -186,8 +186,12 @@ def allocate(nodes, hz_targets):
     """
     Recursively assign allocated budget to every node.
     Returns dict {nid: float}.
-    OR  gate: each child = parent / n_children
-    AND gate: each child = parent ^ (1/n_children)
+
+    GATE IS ON THE PARENT NODE — it defines how the parent splits its budget
+    among ALL its children uniformly. A parent cannot have mixed gate types.
+
+    OR  gate: each child T = parent_T / n          (sum of children = parent)
+    AND gate: each child T = parent_T ^ (1/n)      (product of children = parent)
     """
     result = {}
 
@@ -197,13 +201,14 @@ def allocate(nodes, hz_targets):
         if not kids:
             return
         n = len(kids)
+        # Gate is the PARENT's gate — how it combines its children
+        parent_gate = nodes[nid].get("gate", "OR")
         for kid in kids:
-            gate = kid.get("gate", "OR")
-            if gate == "AND":
-                # AND: each child gets parent^(1/n) — combined prob = product
+            if parent_gate == "AND":
+                # AND gate: product of children = parent → each child = parent^(1/n)
                 child_budget = (budget ** (1.0 / n)) if budget > 0 else 0.0
             else:
-                # OR: each child gets parent/n — combined prob = sum
+                # OR gate: sum of children = parent → each child = parent / n
                 child_budget = budget / n if n > 0 else 0.0
             _recurse(kid["id"], child_budget)
 
@@ -764,10 +769,12 @@ with st.sidebar:
         hz_label = st.text_input("Label", value="HZ01", key="hz_lbl")
         hz_name  = st.text_input("Name", value="", key="hz_nm")
         hz_tgt   = sci_input("Target", "hz_m", "hz_e", 1e-7)
+        hz_gate_sel = st.selectbox("Gate for SF children", ["OR", "AND"], key="hz_gate_sel",
+                                  help="OR = any SF causes HZ (sum). AND = all SFs must fail (product).")
         if st.button("➕ Add Hazard", use_container_width=True):
             nid = next_id()
             nodes[nid] = {"id": nid, "label": hz_label, "name": hz_name,
-                          "type": "HZ", "gate": "–", "parent": None, "achieved": None}
+                          "type": "HZ", "gate": hz_gate_sel, "parent": None, "achieved": None}
             hz_targets[nid] = hz_tgt or 1e-7
             save_to_file(); st.rerun()
 
@@ -789,7 +796,7 @@ with st.sidebar:
 
             gate_default = "–" if ntype == "IF" else "OR"
             if ntype not in ("IF",):
-                n_gate = st.selectbox("Gate (this→parent)", ["OR", "AND"], key="n_gate")
+                n_gate = st.selectbox("Gate (how this node combines its children)", ["OR", "AND"], key="n_gate")
             else:
                 n_gate = "–"
                 st.info("IF nodes are leaves — no gate needed.")
@@ -825,7 +832,7 @@ with st.sidebar:
                     new_tgt = sci_input("HZ Target", "etm", "ete", cur_tgt)
                 if en["type"] not in ("HZ","IF"):
                     eg_opts = ["OR","AND"]
-                    eg = st.selectbox("Gate", eg_opts,
+                    eg = st.selectbox("Gate (how this node combines its children)", eg_opts,
                                       index=eg_opts.index(en.get("gate","OR")) if en.get("gate","OR") in eg_opts else 0,
                                       key="eg")
                 else:
@@ -933,9 +940,11 @@ else:
     with tab_vals:
         st.markdown('<div class="callout">'
             '<b style="color:#7ab8e8">How it works:</b><br>'
-            '▶ <b>Allocated (T)</b> = auto-calculated top-down from HZ target. OR: T÷n per child · AND: T^(1/n) per child. <em>Never influenced by achieved values.</em><br>'
+            '▶ <b>Allocated (T)</b> = auto-calculated top-down from HZ target. <b>Gate is on the PARENT node</b> — it defines how that parent splits budget to ALL its children.<br>'
+            '&emsp; OR gate: each child T = parent_T ÷ n &emsp; AND gate: each child T = parent_T^(1/n)<br>'
             '▶ <b>Achieved (A)</b> = value you enter. Rolled up bottom-up: OR: ΣA · AND: ΠA.<br>'
-            '▶ <b>Shared failures</b>: nodes with the same Label get worst-case (max) value synced automatically across all hazards.'
+            '▶ <b>Shared failures</b>: nodes with the same Label get worst-case (max) value synced automatically across all hazards.<br>'
+            '▶ <b>AND gate note</b>: AND means all children must fail simultaneously → each child is allowed a HIGHER individual failure rate (T^(1/n) &gt; T). This is correct FTA behaviour.'
             '</div>', unsafe_allow_html=True)
 
         sync_log = []  # collect changes for display
